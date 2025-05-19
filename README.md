@@ -1,10 +1,10 @@
-# RedTeam Logger
+# Ops Logger
 
 A comprehensive terminal logging solution for red team operations with tmux integration.
 
 ## Overview
 
-RedTeam Logger provides automated logging and recording of terminal sessions during security operations. It captures commands, outputs, and full terminal recordings for documentation, evidence gathering, and audit trails.
+Ops Logger provides automated logging and recording of terminal sessions during security operations. It captures commands, outputs, and full terminal recordings for documentation, evidence gathering, and audit trails.
 
 Key features:
 - **Shell-Agnostic**: Works with bash and zsh shells running inside tmux
@@ -22,23 +22,23 @@ Key features:
 
 ```bash
 # Download and make executable
-curl -L -o ~/redteam-logger.sh https://raw.githubusercontent.com/your-repo/redteam-logger/main/redteam-logger.sh
-chmod +x ~/redteam-logger.sh
+curl -L -o ~/ops-logger.sh https://raw.githubusercontent.com/your-repo/ops-logger/main/ops-logger.sh
+chmod +x ~/ops-logger.sh
 
 # Install tmux integration
-~/redteam-logger.sh --install
+~/ops-logger.sh --install
 ```
 
 ### Manual Setup
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-repo/redteam-logger.git
-cd redteam-logger
+git clone https://github.com/your-repo/ops-logger.git
+cd ops-logger
 
 # Make executable and install
-chmod +x redteam-logger.sh
-./redteam-logger.sh --install
+chmod +x ops-logger.sh
+./ops-logger.sh --install
 ```
 
 ## Usage
@@ -46,9 +46,9 @@ chmod +x redteam-logger.sh
 ### Command-Line Options
 
 ```
-RedTeam Terminal Logger - Professional Solution v2.1.3
+Ops Terminal Logger - Professional Solution v2.1.3
 ======================================================
-USAGE: ./redteam-logger.sh [OPTIONS]
+USAGE: ./ops-logger.sh [OPTIONS]
 
 LOGGING CONTROLS:
   --start               Start command/verbose logging
@@ -94,7 +94,7 @@ Note: "Prefix" refers to your tmux prefix key (default: Ctrl+b).
 
 ### Oh My Tmux! Users
 
-RedTeam Logger automatically detects and integrates with Oh My Tmux! configurations. The keybindings are installed without conflicting with existing Oh My Tmux! features.
+Ops Logger automatically detects and integrates with Oh My Tmux! configurations. The keybindings are installed without conflicting with existing Oh My Tmux! features.
 
 ### Custom tmux Configurations
 
@@ -102,8 +102,8 @@ If you have a custom tmux setup, the installer will add these keybindings:
 
 ```bash
 # Automatically added by --install
-bind-key L run-shell "'/path/to/redteam-logger.sh' --toggle"
-bind-key R run-shell "'/path/to/redteam-logger.sh' --toggle-recording"
+bind-key L run-shell "'/path/to/ops-logger.sh' --toggle"
+bind-key R run-shell "'/path/to/ops-logger.sh' --toggle-recording"
 ```
 
 ### Custom Key Bindings
@@ -112,21 +112,21 @@ You can manually set different keys if L and R conflict with your setup:
 
 ```bash
 # Example with different keys in .tmux.conf
-bind-key O run-shell "~/redteam-logger.sh --toggle"
-bind-key P run-shell "~/redteam-logger.sh --toggle-recording"
+bind-key O run-shell "~/ops-logger.sh --toggle"
+bind-key P run-shell "~/ops-logger.sh --toggle-recording"
 ```
 
 ## First-Time Setup
 
-On first run, RedTeam Logger will:
+On first run, Ops Logger will:
 1. Prompt for configuration setup
 2. Ask for target name (defaults to `target-hostname`)
 3. Set log directory (defaults to `~/OperationLogs`)
-4. Create configuration file at `~/.redteam-logger.conf`
+4. Create configuration file at `~/.ops-logger.conf`
 
 Reconfigure at any time with:
 ```bash
-./redteam-logger.sh --config
+./ops-logger.sh --config
 ```
 
 ## Workflow Examples
@@ -150,17 +150,17 @@ Reconfigure at any time with:
 
 ### Multiple Pane Operations
 
-RedTeam Logger works independently in each tmux pane:
+Ops Logger works independently in each tmux pane:
 - Each pane gets its own normalized ID (e.g., `main-0-0`, `main-0-1`)
 - Logging and recording can be enabled per-pane
 - Visual indicators show status for each pane
 
 ## Configuration
 
-Configuration is stored in `~/.redteam-logger.conf`:
+Configuration is stored in `~/.ops-logger.conf`:
 
 ```bash
-# RedTeam Logger Configuration
+# Ops Logger Configuration
 TARGET_NAME="target-example"
 LOG_DIR="/home/user/OperationLogs"
 PROMPT_NEW_SHELLS=true
@@ -180,7 +180,7 @@ DEBUG=false
 
 ## Shell Compatibility
 
-RedTeam Logger currently supports:
+Ops Logger currently supports:
 - **Bash**: Full support with history-based command detection
 - **Zsh**: Full support with preexec/precmd hooks
 - **Other shells**: May work but not specifically tested
@@ -250,7 +250,7 @@ Basic recordings are stored as individual frame captures with metadata. They can
 
 ## Status Indicators
 
-RedTeam Logger provides visual feedback through tmux window names:
+Ops Logger provides visual feedback through tmux window names:
 - **🔴 [window-name]**: Logging is active in this window
 - **🎥 [window-name]**: Recording is active in this window
 - **🔴🎥 [window-name]**: Both logging and recording are active
@@ -267,9 +267,9 @@ RedTeam Logger provides visual feedback through tmux window names:
 ### Enable Debug Mode
 
 ```bash
-./redteam-logger.sh --debug-on
-./redteam-logger.sh --status
-# Check ~/OperationLogs/redteam-logger-debug.log for details
+./ops-logger.sh --debug-on
+./ops-logger.sh --status
+# Check ~/OperationLogs/ops-logger-debug.log for details
 ```
 
 ### Common Issues
@@ -277,11 +277,11 @@ RedTeam Logger provides visual feedback through tmux window names:
 1. **Keybindings not working:**
    ```bash
    # Check if bindings are installed
-   tmux list-keys | grep redteam
+   tmux list-keys | grep ops
    
    # Manually reinstall
-   ./redteam-logger.sh --uninstall
-   ./redteam-logger.sh --install
+   ./ops-logger.sh --uninstall
+   ./ops-logger.sh --install
    ```
 
 2. **No output in logs:**
@@ -305,14 +305,14 @@ RedTeam Logger provides visual feedback through tmux window names:
    
    # Recreate if needed
    rm -rf ~/OperationLogs/
-   ./redteam-logger.sh --start
+   ./ops-logger.sh --start
    ```
 
 ### Complete Removal
 
 ```bash
 # Stop all logging and remove everything
-./redteam-logger.sh --uninstall-all
+./ops-logger.sh --uninstall-all
 
 # This removes:
 # - tmux keybindings
@@ -323,11 +323,11 @@ RedTeam Logger provides visual feedback through tmux window names:
 
 ## ShellOpsLog Compatibility
 
-RedTeam Logger includes compatibility with the ShellOpsLog API:
+Ops Logger includes compatibility with the ShellOpsLog API:
 
 ```bash
 # Source the script for compatibility functions
-source redteam-logger.sh
+source ops-logger.sh
 
 # Use ShellOpsLog-style commands
 start_operation_log
@@ -345,7 +345,7 @@ stop_operation_log
 
 ## Performance
 
-RedTeam Logger is designed to be lightweight:
+Ops Logger is designed to be lightweight:
 - Minimal CPU overhead during normal operation
 - Output buffering prevents excessive I/O
 - Configurable recording intervals for basic recording mode
@@ -374,5 +374,5 @@ This tool is intended for authorized red team operations only. Users are respons
 - Complying with applicable laws and regulations
 - Using the tool ethically and responsibly
 
-RedTeam Logger captures and stores everything typed and displayed in terminal sessions. Exercise appropriate caution when handling the resulting log files.
+Ops Logger captures and stores everything typed and displayed in terminal sessions. Exercise appropriate caution when handling the resulting log files.
 

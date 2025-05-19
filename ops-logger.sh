@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# RedTeamLogger - Complete logging solution for red team operations
+# OpsLogger - Complete logging solution for red team operations
 # Version 2.1.4 - Fixed recording to work in current pane and require asciinema
 
 # Configuration variables
-CONFIG_FILE="${HOME}/.redteam-logger.conf"
+CONFIG_FILE="${HOME}/.ops-logger.conf"
 DEFAULT_TARGET="target-$(hostname | tr '.' '-')"
 DEFAULT_LOG_DIR="${HOME}/OperationLogs"
 PROMPT_NEW_SHELLS=true
@@ -11,15 +11,15 @@ RECORD_INTERVAL=0.5
 DEBUG=false
 
 # File markers
-LOG_MARKER="/tmp/redteam-logger-active"
-RECORDING_MARKER="/tmp/redteam-logger-recording"
+LOG_MARKER="/tmp/ops-logger-active"
+RECORDING_MARKER="/tmp/ops-logger-recording"
 
 # Helper functions
 log_debug() {
     if [[ "$DEBUG" == "true" ]]; then
         local debug_dir="${LOG_DIR:-${DEFAULT_LOG_DIR}}"
         mkdir -p "$debug_dir" 2>/dev/null
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: $*" >> "${debug_dir}/redteam-logger-debug.log"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: $*" >> "${debug_dir}/ops-logger-debug.log"
     fi
 }
 
@@ -43,7 +43,7 @@ load_config() {
 save_config() {
     ensure_dir "$(dirname "$CONFIG_FILE")"
     cat > "$CONFIG_FILE" << EOF
-# RedTeam Logger Configuration
+# Ops Logger Configuration
 TARGET_NAME="$TARGET_NAME"
 LOG_DIR="$LOG_DIR"
 PROMPT_NEW_SHELLS=$PROMPT_NEW_SHELLS
@@ -154,7 +154,7 @@ while IFS= read -r line; do
         ')
         
         # Write everything to output buffer - let the command handler filter
-        echo "\$clean_line" >> "/tmp/redteam-output-\$PANE_ID"
+        echo "\$clean_line" >> "/tmp/ops-output-\$PANE_ID"
     fi
 done
 EOF
@@ -189,7 +189,7 @@ should_log_command() {
         # Internal logger functions
         *"RTL_"*|*"log_command"*|*"should_log_command"*) return 1 ;;
         # Shell internals
-        "history "*|*"PROMPT_COMMAND"*|*"source /tmp/redteam"*) return 1 ;;
+        "history "*|*"PROMPT_COMMAND"*|*"source /tmp/ops"*) return 1 ;;
         # Empty commands
         "") return 1 ;;
         *) return 0 ;;
@@ -198,7 +198,7 @@ should_log_command() {
 
 # Function to get command output with minimal filtering
 get_command_output() {
-    local output_file="/tmp/redteam-output-\$PANE_ID"
+    local output_file="/tmp/ops-output-\$PANE_ID"
     local output=""
     
     if [[ -f "\$output_file" ]]; then
@@ -342,7 +342,7 @@ fi
 
 # Mark as active
 echo "\$\$" > "${LOG_MARKER}-\${PANE_ID}"
-echo "RedTeam Logger command hook installed for pane \$PANE_ID" >&2
+echo "Ops Logger command hook installed for pane \$PANE_ID" >&2
 EOF
     chmod +x "$hook_script"
 }
@@ -362,7 +362,7 @@ install_logging() {
         local tmux_pane_ref=$(get_tmux_pane_ref)
         
         # Create output capture script
-        local capture_script="/tmp/redteam-capture-${id}.sh"
+        local capture_script="/tmp/ops-capture-${id}.sh"
         create_capture_script "$capture_script" "$verbose_log" "$id"
         
         # Set up tmux pipe-pane to capture output
@@ -370,7 +370,7 @@ install_logging() {
         log_debug "tmux pipe-pane started for pane $tmux_pane_ref (normalized: $id)"
         
         # Create command hook
-        local hook_script="/tmp/redteam-hook-${id}.sh"
+        local hook_script="/tmp/ops-hook-${id}.sh"
         create_command_hook "$hook_script" "$csv_log" "$verbose_log" "$id"
         
         # Source the command hook in the target pane
@@ -390,7 +390,7 @@ install_logging() {
         log_debug "Installing direct shell logging"
         
         # Create command hook
-        local hook_script="/tmp/redteam-hook-${id}.sh"
+        local hook_script="/tmp/ops-hook-${id}.sh"
         create_command_hook "$hook_script" "$csv_log" "$verbose_log" "$id"
         
         # Source the hook directly
@@ -418,8 +418,8 @@ remove_logging() {
         log_debug "Stopped tmux pipe-pane for pane $tmux_pane_ref (normalized: $id)"
         
         # Create and source cleanup script
-        cat > "/tmp/redteam-cleanup-${id}.sh" << 'EOF'
-# Cleanup script for RedTeam Logger
+        cat > "/tmp/ops-cleanup-${id}.sh" << 'EOF'
+# Cleanup script for Ops Logger
 if [[ -n "$BASH_VERSION" ]]; then
     # Restore original PROMPT_COMMAND
     if [[ -n "$RTL_ORIG_PROMPT_COMMAND" ]]; then
@@ -443,9 +443,9 @@ unset RTL_CURRENT_COMMAND RTL_COMMAND_START_TIME RTL_LAST_COMMAND RTL_LAST_HISTN
 unset RTL_INTERNAL_LOGGING
 unset CSV_LOG VERBOSE_LOG PANE_ID PUBLIC_IP
 
-echo "RedTeam Logger hooks removed" >&2
+echo "Ops Logger hooks removed" >&2
 EOF
-        tmux send-keys -t "$tmux_pane_ref" "source /tmp/redteam-cleanup-${id}.sh" Enter
+        tmux send-keys -t "$tmux_pane_ref" "source /tmp/ops-cleanup-${id}.sh" Enter
         
         # Reset window name
         local window_name=$(tmux display -t "$tmux_pane_ref" -p '#{window_name}')
@@ -454,7 +454,7 @@ EOF
         fi
         
         # Cleanup after delay
-        tmux run-shell "sleep 3; rm -f /tmp/redteam-cleanup-${id}.sh /tmp/redteam-capture-${id}.sh /tmp/redteam-hook-${id}.sh /tmp/redteam-output-${id}"
+        tmux run-shell "sleep 3; rm -f /tmp/ops-cleanup-${id}.sh /tmp/ops-capture-${id}.sh /tmp/ops-hook-${id}.sh /tmp/ops-output-${id}"
         
         tmux display-message "Logging removed for pane $id"
     else
@@ -483,7 +483,7 @@ EOF
     
     # Remove all temp files and markers
     rm -f "${LOG_MARKER}-${id}" "${LOG_MARKER}-${id}.success"
-    rm -f "/tmp/redteam-hook-${id}.sh" "/tmp/redteam-capture-${id}.sh" "/tmp/redteam-output-${id}"
+    rm -f "/tmp/ops-hook-${id}.sh" "/tmp/ops-capture-${id}.sh" "/tmp/ops-output-${id}"
     
     log_debug "Logging removal completed for pane $id"
 }
@@ -734,13 +734,13 @@ uninstall_all() {
     }
     
     # Remove debug log if it exists
-    [[ -f "${log_dir_for_cleanup}/redteam-logger-debug.log" ]] && {
-        rm -f "${log_dir_for_cleanup}/redteam-logger-debug.log"
+    [[ -f "${log_dir_for_cleanup}/ops-logger-debug.log" ]] && {
+        rm -f "${log_dir_for_cleanup}/ops-logger-debug.log"
         log_debug "Removed debug log"
     }
     
     # Clean up all temp files
-    rm -f /tmp/redteam-* 2>/dev/null
+    rm -f /tmp/ops-* 2>/dev/null
     
     is_tmux && tmux display-message "Completely uninstalled (all files removed)" || echo "Completely uninstalled"
     log_debug "Complete uninstall finished"
@@ -783,7 +783,7 @@ show_status() {
     if [[ "$DEBUG" == "true" ]]; then
         echo ""
         echo "Debug Information:"
-        echo "Temp files: $(ls -la /tmp/redteam-* 2>/dev/null | wc -l)"
+        echo "Temp files: $(ls -la /tmp/ops-* 2>/dev/null | wc -l)"
         echo "Active markers: $(ls -la ${LOG_MARKER}-* 2>/dev/null | wc -l)"
     fi
 }
