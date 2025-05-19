@@ -2,6 +2,10 @@
 
 A comprehensive terminal logging solution for red team operations with tmux integration.
 
+## Info
+
+Currently the operator log csv works great. However, the venbose logging has a sync issue where if you run commands too quickly it may mix up output. The recording feature is still a work in progress
+
 ## Overview
 
 Ops Logger provides automated logging and recording of terminal sessions during security operations. It captures commands, outputs, and full terminal recordings for documentation, evidence gathering, and audit trails.

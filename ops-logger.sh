@@ -131,7 +131,7 @@ EOF
     echo "$verbose_log"
 }
 
-# Create simple output capture with minimal ANSI cleaning
+# Create simple output capture with improved ANSI cleaning
 create_capture_script() {
     local capture_script="$1"
     local verbose_log="$2"
@@ -139,7 +139,7 @@ create_capture_script() {
     
     cat > "$capture_script" << EOF
 #!/usr/bin/env bash
-# Simple output capture with minimal ANSI cleaning (working version)
+# Output capture with better ANSI cleaning
 VERBOSE_LOG="$verbose_log"
 PANE_ID="$pane_id"
 
@@ -147,21 +147,28 @@ PANE_ID="$pane_id"
 while IFS= read -r line; do
     # Only process non-empty lines
     if [[ -n "\$line" ]]; then
-        # Minimal ANSI cleaning - only remove the most common sequences
+        # More thorough ANSI cleaning - remove cursor movements, backspaces, etc.
         clean_line=\$(printf '%s\n' "\$line" | sed -E '
             s/\x1B\[2004[lh]//g
+            s/\x1B\[[0-9;]*[mGKHJA-Z]//g
+            s/\x1B\[[?][0-9]*[lh]//g
+            s/\x08//g
             s/\r//g
         ')
         
-        # Write everything to output buffer - let the command handler filter
-        echo "\$clean_line" >> "/tmp/ops-output-\$PANE_ID"
+        # Write to command-specific buffer if available, otherwise to general buffer
+        if [[ -n "\$RTL_CURRENT_CMD_ID" ]]; then
+            echo "\$clean_line" >> "/tmp/ops-output-\$PANE_ID-\$RTL_CURRENT_CMD_ID"
+        else
+            echo "\$clean_line" >> "/tmp/ops-output-\$PANE_ID"
+        fi
     fi
 done
 EOF
     chmod +x "$capture_script"
 }
 
-# Create command hook with improved logic
+# Create command hook with race condition protection
 create_command_hook() {
     local hook_script="$1"
     local csv_log="$2"
@@ -170,7 +177,7 @@ create_command_hook() {
     
     cat > "$hook_script" << EOF
 #!/usr/bin/env bash
-# Command hook with minimal filtering
+# Command hook with improved output handling
 
 CSV_LOG="$csv_log"
 VERBOSE_LOG="$verbose_log"
@@ -196,22 +203,36 @@ should_log_command() {
     esac
 }
 
-# Function to get command output with minimal filtering
+# Function to get command output with improved handling
 get_command_output() {
-    local output_file="/tmp/ops-output-\$PANE_ID"
+    local cmd_id="\$1"
+    local output_file="/tmp/ops-output-\$PANE_ID-\$cmd_id"
+    local fallback_file="/tmp/ops-output-\$PANE_ID"
     local output=""
     
+    # Wait briefly for output to be captured
+    sleep 0.2
+    
     if [[ -f "\$output_file" ]]; then
-        # Get last 10 lines, clean up minimally
-        output=\$(tail -n 10 "\$output_file" 2>/dev/null | sed '
-            # Remove obvious ANSI escape sequences but preserve content
+        # Get output and clean up minimally
+        output=\$(cat "\$output_file" 2>/dev/null | tail -n 10 | sed '
+            # Remove any remaining escape sequences
             s/\x1B\[[0-9;]*[mGKH]//g
             s/\x1B\[[?][0-9]*[hl]//g
-            # Remove empty lines
+            # Remove duplicate empty lines
             /^$/d
         ')
         # Remove the temp file
         rm -f "\$output_file"
+    elif [[ -f "\$fallback_file" ]]; then
+        # Fallback to general output file if command-specific one doesn't exist
+        output=\$(tail -n 10 "\$fallback_file" 2>/dev/null | sed '
+            s/\x1B\[[0-9;]*[mGKH]//g
+            s/\x1B\[[?][0-9]*[hl]//g
+            /^$/d
+        ')
+        # Clear the general file after reading
+        : > "\$fallback_file"
     fi
     
     # Return the output
@@ -226,6 +247,7 @@ RTL_log_command() {
     local cmd="\$1"
     local start_time="\$2"
     local end_time="\$3"
+    local cmd_id="\$4"
     local user=\$(whoami)
     local path=\$(pwd)
     
@@ -236,11 +258,8 @@ RTL_log_command() {
     local old_flag="\$RTL_INTERNAL_LOGGING"
     RTL_INTERNAL_LOGGING=false
     
-    # Brief delay to ensure output is captured
-    sleep 0.1
-    
-    # Get command output
-    local output=\$(get_command_output)
+    # Get command output using command-specific ID
+    local output=\$(get_command_output "\$cmd_id")
     
     # Escape quotes for CSV
     local escaped_cmd=\${cmd//\"/\"\"}
@@ -294,18 +313,28 @@ if [[ -n "\$BASH_VERSION" ]]; then
         local current_histnum=\$(history 1 | awk '{print \$1}')
         local current_cmd=\$(history 1 | sed 's/^[ ]*[0-9][0-9]*[ ]*//')
         
+        # Generate unique command ID using timestamp and history number
+        local cmd_id="\$(date +%s%N)-\$current_histnum"
+        
+        # Export command ID for output capture script
+        export RTL_CURRENT_CMD_ID="\$cmd_id"
+        
         # Only log if this is a new command
         if [[ -n "\$current_cmd" && "\$current_cmd" != "\$RTL_LAST_COMMAND" && "\$current_histnum" != "\$RTL_LAST_HISTNUM" ]]; then
             # Estimate start time (rough approximation)
             local start_time_formatted="\$(date -d '1 second ago' '+%Y-%m-%d %H:%M:%S')"
             
-            # Log the command
-            RTL_log_command "\$current_cmd" "\$start_time_formatted" "\$end_time_formatted"
+            # Log the command with its unique ID
+            RTL_log_command "\$current_cmd" "\$start_time_formatted" "\$end_time_formatted" "\$cmd_id"
             
             # Update tracking variables
             RTL_LAST_COMMAND="\$current_cmd"
             RTL_LAST_HISTNUM="\$current_histnum"
         fi
+        
+        # Clear command ID after processing
+        sleep 0.2  # Give time for output to be captured
+        unset RTL_CURRENT_CMD_ID
     }
     
     # Set PROMPT_COMMAND
@@ -316,23 +345,29 @@ if [[ -n "\$BASH_VERSION" ]]; then
     fi
     
 elif [[ -n "\$ZSH_VERSION" ]]; then
-    # Zsh implementation using preexec and precmd hooks
+    # Similar implementation for ZSH with command ID support
     RTL_preexec() {
         # Skip internal commands
         should_log_command "\$1" || return
         
         RTL_CURRENT_COMMAND="\$1"
         RTL_COMMAND_START_TIME="\$(date '+%Y-%m-%d %H:%M:%S')"
+        RTL_CURRENT_CMD_ID="\$(date +%s%N)"
+        export RTL_CURRENT_CMD_ID
     }
     
     RTL_precmd() {
         if [[ -n "\$RTL_CURRENT_COMMAND" && -n "\$RTL_COMMAND_START_TIME" ]]; then
             local end_time="\$(date '+%Y-%m-%d %H:%M:%S')"
             
-            RTL_log_command "\$RTL_CURRENT_COMMAND" "\$RTL_COMMAND_START_TIME" "\$end_time"
+            RTL_log_command "\$RTL_CURRENT_COMMAND" "\$RTL_COMMAND_START_TIME" "\$end_time" "\$RTL_CURRENT_CMD_ID"
             
             unset RTL_CURRENT_COMMAND RTL_COMMAND_START_TIME
         fi
+        
+        # Clear command ID after processing
+        sleep 0.2  # Give time for output to be captured
+        unset RTL_CURRENT_CMD_ID
     }
     
     autoload -Uz add-zsh-hook
