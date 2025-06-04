@@ -560,8 +560,6 @@ install_logging() {
         if check_tmux_logging_installed; then
             if start_verbose_logging "$id" "$tmux_pane_ref" "$target" "$log_dir"; then
                 log_debug "Verbose logging started successfully"
-                # Send message directly to pane instead of displaying popup
-                tmux send-keys -t "$tmux_pane_ref" "echo 'Verbose logging active: ${log_dir}/verbose/${target}_verbose_*_${id}_*.log'" ENTER
             else
                 log_debug "Verbose logging may not have started correctly, continuing with CSV only"
             fi
@@ -585,8 +583,6 @@ install_logging() {
         touch "${LOG_MARKER}-${id}"
         touch "${LOG_MARKER}-${id}.success"
         
-        # Send message directly to pane instead of displaying popup
-        tmux send-keys -t "$tmux_pane_ref" "echo 'Logging started for pane $id'" ENTER
         
     else
         # Direct shell logging (CSV only - no verbose logging available)
@@ -653,8 +649,6 @@ EOF
         # Cleanup temp files
         rm -f "/tmp/ops-hook-${id}.sh"
         
-        # Send message directly to pane instead of displaying popup
-        tmux send-keys -t "$tmux_pane_ref" "echo 'Logging removed for pane $id'" ENTER
     else
         # Direct shell cleanup
         if [[ -n "$BASH_VERSION" ]]; then
@@ -722,8 +716,6 @@ start_recording() {
         # Start recording cleanly
         tmux send-keys -t "$tmux_pane_ref" "asciinema rec '$cast_file'" ENTER
         
-        # Send message directly to pane instead of displaying popup
-        tmux send-keys -t "$tmux_pane_ref" "echo 'Recording started in current pane. Use exit or Ctrl+D to stop.'" ENTER
     else
         echo "Starting asciinema recording. Use 'exit' or Ctrl+D to stop."
         asciinema rec "$cast_file"
@@ -772,8 +764,6 @@ stop_recording() {
                 fi
             fi
             
-            # Send message directly to pane instead of displaying popup
-            tmux send-keys -t "$tmux_pane_ref" "echo 'Recording stopped: $rec_path'" ENTER
         else
             echo "Recording stopped: $rec_path"
         fi
@@ -1014,10 +1004,21 @@ prompt_for_logging() {
     load_config
     [[ "$PROMPT_NEW_SHELLS" != "true" ]] && return 0
     
-    # FIXED: Just start logging automatically without any prompts
-    # This eliminates the tmux display-menu issue completely
-    echo "Auto-starting logging for new shell..."
-    start_logging
+    # Properly prompt the user with default to NO
+    echo "Red Team Logger - New shell detected"
+    echo -n "Start logging for this session? [y/N]: "
+    
+    # Read with timeout to avoid hanging if there's no input
+    read -t 10 -n 1 -r response
+    echo # Add newline after response
+    
+    # Default to NO (only start if explicitly 'y' or 'Y')
+    if [[ "${response,,}" == "y" ]]; then
+        echo "Starting logging..."
+        start_logging
+    else
+        echo "Logging not started. Use 'ops-logger --start' to start manually."
+    fi
 }
 
 # ================================================================
