@@ -852,7 +852,7 @@ EOSCRIPT
         chmod +x "$config_script"
         
         # Open new window for config
-        tmux new-window -n "OpsLogger Config" "bash '$config_script'; rm -f '$config_script'"
+        bash $config_script; rm -f $config_script
         return 0
     fi
     
