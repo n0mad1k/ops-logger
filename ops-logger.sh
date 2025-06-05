@@ -990,34 +990,20 @@ toggle_recording() {
     is_recording_active "$id" && stop_recording "$id" || start_recording "$id" "$TARGET_NAME" "$LOG_DIR"
 }
 
-# FIXED: Simple terminal prompt without any tmux interface
 prompt_for_logging() {
-    # Ensure we output to terminal if run from tmux hook
-    if is_tmux && [[ -t 1 ]]; then
-        local tty=$(tty 2>/dev/null || echo "/dev/tty")
-        exec 1>$tty 2>$tty
-    fi
-    
     local id=$(get_pane_id)
     is_logging_active "$id" && return 0
     
     load_config
     [[ "$PROMPT_NEW_SHELLS" != "true" ]] && return 0
     
-    # Properly prompt the user with default to NO
-    echo "Red Team Logger - New shell detected"
-    echo -n "Start logging for this session? [y/N]: "
-    
-    # Read with timeout to avoid hanging if there's no input
-    read -t 10 -n 1 -r response
-    echo # Add newline after response
-    
-    # Default to NO (only start if explicitly 'y' or 'Y')
-    if [[ "${response,,}" == "y" ]]; then
-        echo "Starting logging..."
-        start_logging
+    if is_tmux; then
+        tmux display-menu -T "Start logging this shell?" \
+            "Yes" y "run-shell \"$0 --start\"" \
+            "No" n ""
     else
-        echo "Logging not started. Use 'ops-logger --start' to start manually."
+        read -p "Start logging this shell? [Y/n] " response
+        [[ -z "$response" || "${response,,}" == "y" ]] && start_logging
     fi
 }
 
@@ -1025,38 +1011,25 @@ prompt_for_logging() {
 # TMUX INTEGRATION
 # ================================================================
 
-# Load existing config only on install
+# Tmux integration functions
 install_tmux_keys() {
     load_config
     
     if is_tmux; then
-        local script_path=$(realpath "$0" 2>/dev/null || readlink -f "$0")
+        local script_path=$(readlink -f "$0")
         
-        # FIXED: Use send-keys instead of run-shell to avoid popups
-        tmux bind-key L send-keys "'$script_path' --toggle" ENTER
-        tmux bind-key R send-keys "'$script_path' --toggle-recording" ENTER
+        # Install key bindings that don't conflict with ohmytmux
+        tmux bind-key L run-shell "'$script_path' --toggle"
+        tmux bind-key R run-shell "'$script_path' --toggle-recording"
         
-        # Create a hook wrapper script that redirects output properly
-        local hook_wrapper="/tmp/ops-logger-hook-wrapper.sh"
-        cat > "$hook_wrapper" << EOH
-#!/bin/bash
-# Wrapper to avoid tmux popups in hooks
-sleep 1
-'$script_path' --prompt > /dev/tty 2>&1
-EOH
-        chmod +x "$hook_wrapper"
-        
-        # Install hooks for new windows/panes if tmux supports hooks
+        # Install hooks for new windows/panes if enabled
         if [[ "$PROMPT_NEW_SHELLS" == "true" ]]; then
-            if tmux show-options -g | grep -q "hook" 2>/dev/null; then
-                # FIXED: Use our wrapper script for hooks
-                tmux set-hook -g after-new-window "run-shell '$hook_wrapper'"
-                tmux set-hook -g after-split-window "run-shell '$hook_wrapper'"
-            fi
+            tmux set-hook -g after-new-window "run-shell \"sleep 1; '$script_path' --prompt\""
+            tmux set-hook -g after-split-window "run-shell \"sleep 1; '$script_path' --prompt\""
         fi
         
-        echo "Keys installed: prefix+L (logging), prefix+R (recording)"
-        log_debug "Tmux key bindings installed (ohmytmux compatible)"
+        tmux display-message "Keys installed: prefix+L (logging), prefix+R (recording)"
+        log_debug "Tmux key bindings installed"
     else
         echo "Not in tmux, no keys installed"
     fi
