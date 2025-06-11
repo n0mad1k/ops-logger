@@ -39,9 +39,10 @@
 ---
 
 **### 📍 Where I Left Off**
-- [x] Working on: Fixed RTL_preexec command not found error
-- [ ] Next Priority: Test comprehensive functionality across different environments
-- [ ] Blockers: Need to verify tmux-logging plugin compatibility in various setups
+- [x] Working on: Fixed RTL_preexec command not found error  
+- [x] Verified command logging, verbose logging, and recording on Ubuntu Bash with ohmytmux  
+- [ ] Next Priority: Continue testing on other environments  
+- [ ] Blockers: None for Ubuntu Bash/ohmytmux; ongoing tests on other setups
 
 ---
 
