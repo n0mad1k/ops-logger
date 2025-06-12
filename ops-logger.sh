@@ -405,48 +405,32 @@ EOF
 }
 
 # ================================================================
-# VERBOSE LOGGING (using tmux-logging plugin with header integration)
+# UNIFIED VERBOSE LOGGING WITH COMMAND HEADERS
 # ================================================================
 
-# Create verbose log file WITH header included in the actual log file
-create_verbose_log_with_header() {
+# Create single master verbose log file for all panes
+create_master_verbose_log() {
     local target="$1"
     local log_dir="$2"
-    local session window pane timestamp
-    
-    if is_tmux; then
-        session=$(tmux display -p '#{session_name}')
-        window=$(tmux display -p '#{window_index}')
-        pane=$(tmux display -p '#{pane_index}')
-        timestamp=$(date +%Y%m%d)
-    else
-        session="shell"
-        window="0"
-        pane="0"
-        timestamp=$(date +%Y%m%d)
-    fi
+    local timestamp=$(date +%Y%m%d)
     
     local verbose_dir="${log_dir}/verbose"
     ensure_dir "$verbose_dir"
     
-    # Create the log file with header directly included
-    local log_file="${verbose_dir}/${target}_verbose_${session}_${window}_${pane}_${timestamp}.log"
+    # Create single log file for entire target
+    local log_file="${verbose_dir}/${target}_master_${timestamp}.log"
     
     # Create the file with header if it doesn't exist
     if [[ ! -f "$log_file" ]]; then
         cat > "$log_file" << EOF
 ================================================================================
                            RED TEAM TERMINAL LOGGER
-                              Daily Verbose Log
+                              Master Verbose Log
 ================================================================================
 Target: $target
 Date: $(date +%Y-%m-%d)
 Host: $(hostname)
 Public IP: $(get_public_ip)
-Pane ID: $(get_pane_id)
-Session: $session
-Window: $window
-Pane: $pane
 Started: $(date '+%Y-%m-%d %H:%M:%S')
 ================================================================================
 
@@ -456,66 +440,431 @@ EOF
     echo "$log_file"
 }
 
-# Configure tmux-logging plugin settings for proper format
-configure_tmux_logging() {
-    local log_file="$1"
-    local target="$2"
+# Create debug filter that captures EVERYTHING (no filtering)
+create_debug_filter_script() {
+    local filter_script="/tmp/ops-debug-filter-$$.sh"
     
-    # Set better ANSI filtering to match our requirements
-    tmux set-option -g @logging-filter-out "\\033\\[[0-9;]*[a-zA-Z]" 2>/dev/null || true
+    cat > "$filter_script" << 'EODEBUG'
+#!/usr/bin/env bash
+# DEBUG: Raw pipe-pane output capture
+
+LOGFILE="$1"
+PANE_ID="$2"
+DEBUG_RAW_FILE="${LOGFILE}.debug-raw"
+
+mkdir -p "$(dirname "$LOGFILE")" 2>/dev/null
+
+echo "[$(date)] DEBUG FILTER STARTED for pane $PANE_ID" >> "$DEBUG_RAW_FILE"
+echo "=================================================" >> "$DEBUG_RAW_FILE"
+
+line_count=0
+while IFS= read -r line; do
+    line_count=$((line_count + 1))
     
-    # Set custom log directory to match our file
-    local log_dir=$(dirname "$log_file")
-    tmux set-option -g @logging-path "$log_dir" 2>/dev/null || true
+    # Write EVERYTHING to debug file with line numbers
+    printf "[%04d][$(date +%H:%M:%S)] RAW: %s\n" "$line_count" "$line" >> "$DEBUG_RAW_FILE"
     
-    # Set custom filename format that matches our pre-created file
-    local filename=$(basename "$log_file")
-    tmux set-option -g @logging-filename "$filename" 2>/dev/null || true
+    # Also write to main log (no filtering at all)
+    echo "$line" >> "$LOGFILE"
+done
+
+echo "[$(date)] DEBUG FILTER ENDED - Total lines: $line_count" >> "$DEBUG_RAW_FILE"
+EODEBUG
     
-    log_debug "Configured tmux-logging settings for file: $log_file"
+    chmod +x "$filter_script"
+    echo "$filter_script"
 }
 
-# Start verbose logging with header properly integrated
-start_verbose_logging() {
+# Add debug start function
+start_debug_verbose_logging() {
     local id="$1"
     local tmux_pane_ref="$2"
     local target="$3"
     local log_dir="$4"
     
-    # Create the log file with header
-    local log_file=$(create_verbose_log_with_header "$target" "$log_dir")
+    local debug_log="${log_dir}/debug-${target}-${id}-$(date +%H%M%S).log"
+    local filter_script=$(create_debug_filter_script)
     
-    # Configure tmux-logging to use our pre-created file
-    configure_tmux_logging "$log_file" "$target"
+    echo "Starting DEBUG verbose logging to: $debug_log"
     
-    # Setup direct pipe-pane with ANSI filtering, appending to our header file
-    log_debug "Starting verbose logging to: $log_file"
+    # Use simple pipe-pane with debug filter
+    tmux pipe-pane -t "$tmux_pane_ref" "bash '$filter_script' '$debug_log' '$id'"
     
-    if command -v ansifilter >/dev/null 2>&1; then
-        tmux pipe-pane -t "$tmux_pane_ref" "ansifilter >> '$log_file'"
-    else
-        # Improved ANSI filtering that preserves readability
-        tmux pipe-pane -t "$tmux_pane_ref" "sed -r 's/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g' >> '$log_file'"
-    fi
+    sleep 1
     
-    # Check if logging started successfully
+    # Check if logging started
     if tmux list-panes -F "#{pane_id} #{pane_pipe}" | grep -q "$tmux_pane_ref.*1"; then
-        log_debug "Verbose logging started successfully to: $log_file"
+        echo "DEBUG logging started successfully"
+        echo "Raw output file: ${debug_log}.debug-raw"
+        echo "Filtered output file: $debug_log"
+        
+        echo "$filter_script" > "/tmp/ops-debug-filter-script-${id}"
         return 0
     else
-        log_debug "ERROR: Verbose logging failed to start"
+        echo "ERROR: DEBUG logging failed to start"
+        rm -f "$filter_script"
         return 1
     fi
 }
 
-# Stop verbose logging
-stop_verbose_logging() {
-    local tmux_pane_ref="$1"
+# Create the MINIMAL FIX verbose filter script
+# Create the FIXED verbose filter script
+create_verbose_filter_script() {
+    local filter_script="/tmp/ops-verbose-filter-$$.sh"
     
-    # Direct pipe-pane stop method (most reliable)
+    cat > "$filter_script" << 'EOFILTER'
+#!/usr/bin/env bash
+# FIXED: Proper command boundary detection
+
+LOGFILE="$1"
+PANE_ID="$2"
+TARGET="$3"
+VERBOSE_CMD_MARKER="$4"
+
+mkdir -p "$(dirname "$LOGFILE")" 2>/dev/null
+
+# Command tracking
+CURRENT_COMMAND=""
+IN_COMMAND=false
+OUTPUT_LINE_COUNT=0
+MAX_LINES_PER_COMMAND=22
+LAST_MARKER_CHECK=""
+
+# Function to properly close a command
+close_current_command() {
+    if [[ "$IN_COMMAND" == "true" ]]; then
+        echo "==============================================================================" >> "$LOGFILE"
+        echo "" >> "$LOGFILE"
+        IN_COMMAND=false
+        OUTPUT_LINE_COUNT=0
+        CURRENT_COMMAND=""
+    fi
+}
+
+# Function to check for new command markers
+check_command_marker() {
+    local marker_file="${VERBOSE_CMD_MARKER}-${PANE_ID}"
+    if [[ -f "$marker_file" ]]; then
+        # Read the marker content
+        local marker_content=$(cat "$marker_file" 2>/dev/null)
+        
+        # Only process if this is a new marker (different from last check)
+        if [[ "$marker_content" != "$LAST_MARKER_CHECK" ]]; then
+            LAST_MARKER_CHECK="$marker_content"
+            
+            # FIXED: Always close previous command first
+            close_current_command
+            
+            # Read command info
+            IFS='|' read -r cmd start_time user path public_ip pane_marker <<< "$marker_content"
+            
+            # Start new command if it's for this pane
+            if [[ "$pane_marker" == "$PANE_ID" && -n "$cmd" ]]; then
+                CURRENT_COMMAND="$cmd"
+                IN_COMMAND=true
+                OUTPUT_LINE_COUNT=0
+                
+                # Write command header
+                cat >> "$LOGFILE" << EOCMD
+==============================================================================
+COMMAND EXECUTION - $start_time
+==============================================================================
+Command: $cmd
+User: $user
+Path: $path
+Start: $start_time
+Pane: $PANE_ID
+Public IP: $public_ip
+------------------------------------------------------------------------------
+OUTPUT:
+EOCMD
+                
+                # Remove the marker file after processing
+                rm -f "$marker_file" 2>/dev/null
+            fi
+        fi
+    fi
+}
+
+# Simple ANSI stripping
+strip_ansi() {
+    local line="$1"
+    # Remove bracketed paste mode
+    line="${line//[?2004h/}"
+    line="${line//[?2004l/}"
+    # Remove ANSI escape sequences
+    line=$(echo "$line" | sed -E 's/\x1b\[[0-9;]*[mGKHF]//g; s/\x1b\[[?]?[0-9]*[hlc]//g')
+    echo "$line"
+}
+
+# Check if line looks like a shell prompt
+is_prompt_line() {
+    local line="$1"
+    # More specific prompt detection patterns
+    if [[ "$line" =~ .*@.*:.*[\$#][[:space:]]*$ ]] || \
+       [[ "$line" =~ ^[[:space:]]*[\$#][[:space:]]*$ ]] || \
+       [[ "$line" =~ .*[\$#][[:space:]]+[a-zA-Z] ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Main processing loop
+while IFS= read -r line; do
+    # ALWAYS check for new commands first, before any processing
+    check_command_marker
+    
+    # Clean the line
+    clean_line=$(strip_ansi "$line")
+    
+    # Skip completely empty lines
+    [[ -z "$clean_line" ]] && continue
+    
+    # If we're in a command, log the output
+    if [[ "$IN_COMMAND" == "true" ]]; then
+        OUTPUT_LINE_COUNT=$((OUTPUT_LINE_COUNT + 1))
+        
+        # Check if this looks like a prompt (indicating command end)
+        if is_prompt_line "$clean_line" && [[ $OUTPUT_LINE_COUNT -gt 1 ]]; then
+            # Don't log the prompt line, just close the command
+            close_current_command
+            continue
+        fi
+        
+        # Log the output line with timestamp
+        if [[ $OUTPUT_LINE_COUNT -le $MAX_LINES_PER_COMMAND ]]; then
+            echo "$(date '+%H:%M:%S') $clean_line" >> "$LOGFILE"
+        elif [[ $OUTPUT_LINE_COUNT -eq $(($MAX_LINES_PER_COMMAND + 1)) ]]; then
+            echo "... [OUTPUT TRUNCATED - showing first $MAX_LINES_PER_COMMAND lines only] ..." >> "$LOGFILE"
+        fi
+    fi
+done
+
+# End any active command on exit
+close_current_command
+
+EOFILTER
+    
+    chmod +x "$filter_script"
+    echo "$filter_script"
+}
+
+# Enhanced command hook that integrates with verbose logging
+create_enhanced_command_hook() {
+    local hook_script="$1"
+    local csv_log="$2"
+    local pane_id="$3"
+    local verbose_log="$4"
+    
+    cat > "$hook_script" << 'EOF'
+#!/usr/bin/env bash
+# Enhanced command hook with verbose integration
+
+set +e
+
+# Configuration
+CSV_LOG="__CSV_LOG__"
+VERBOSE_LOG="__VERBOSE_LOG__"
+PANE_ID="__PANE_ID__"
+PUBLIC_IP=$(timeout 5 curl -s ifconfig.me 2>/dev/null || echo "unknown")
+RTL_INTERNAL_LOGGING=true
+RTL_CMD_START_TIME=""
+VERBOSE_CMD_MARKER="__VERBOSE_CMD_MARKER__"
+
+# Function to check if command should be logged
+should_log_command() {
+    local cmd="$1"
+    case "$cmd" in
+        *"RTL_"*|*"log_command"*|*"CSV_LOG"*|*"should_log_command"*) return 1 ;;
+        "history "*|*"PROMPT_COMMAND"*|*"source /tmp/ops"*) return 1 ;;
+        "") return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# Enhanced function to write verbose command header
+write_verbose_header() {
+    local cmd="$1"
+    local start_time="$2"
+    local user=$(whoami)
+    local path=$(pwd)
+    
+    # Create marker for verbose filter
+    echo "$cmd|$start_time|$user|$path|$PUBLIC_IP|$PANE_ID" > "${VERBOSE_CMD_MARKER}-${PANE_ID}"
+}
+
+# Function to log command to CSV (unchanged)
+RTL_log_command() {
+    local cmd="$1"
+    local start_time="$2"
+    local end_time="$3"
+    local user=$(whoami)
+    local path=$(pwd)
+    
+    should_log_command "$cmd" || return 0
+    
+    local old_flag="$RTL_INTERNAL_LOGGING"
+    RTL_INTERNAL_LOGGING=false
+    
+    local escaped_cmd=${cmd//\"/\"\"}
+    
+    printf '"%s","%s","%s","%s","%s","%s"\n' \
+        "$start_time" "$end_time" "$PUBLIC_IP" "$user" "$path" "$escaped_cmd" >> "$CSV_LOG" 2>/dev/null
+    
+    RTL_INTERNAL_LOGGING="$old_flag"
+}
+
+# BASH-specific setup
+if [[ -n "$BASH_VERSION" ]]; then
+    [[ -z "$RTL_ORIG_PROMPT_COMMAND" ]] && RTL_ORIG_PROMPT_COMMAND="$PROMPT_COMMAND"
+    
+    RTL_LAST_COMMAND=""
+    RTL_LAST_HISTNUM=""
+    
+    RTL_preexec() {
+        local cmd="$BASH_COMMAND"
+        if should_log_command "$cmd" 2>/dev/null; then
+            RTL_CMD_START_TIME="$(date '+%Y-%m-%d %H:%M:%S')"
+            write_verbose_header "$cmd" "$RTL_CMD_START_TIME"
+        fi
+    }
+    
+    RTL_PROMPT_COMMAND() {
+        if [[ "$RTL_INTERNAL_LOGGING" == "false" ]]; then
+            return 0
+        fi
+        
+        local current_histnum=$(history 1 2>/dev/null | awk '{print $1}')
+        local current_cmd=$(history 1 2>/dev/null | sed 's/^[ ]*[0-9]*[ ]*//')
+        
+        if [[ "$current_cmd" != "$RTL_LAST_COMMAND" && "$current_histnum" != "$RTL_LAST_HISTNUM" ]]; then
+            if should_log_command "$current_cmd" 2>/dev/null; then
+                local end_time="$(date '+%Y-%m-%d %H:%M:%S')"
+                local start_time="${RTL_CMD_START_TIME:-$end_time}"
+                
+                RTL_log_command "$current_cmd" "$start_time" "$end_time"
+                
+                RTL_LAST_COMMAND="$current_cmd"
+                RTL_LAST_HISTNUM="$current_histnum"
+            fi
+        fi
+        
+        RTL_CMD_START_TIME=""
+    }
+    
+    trap 'RTL_preexec 2>/dev/null || true' DEBUG 2>/dev/null
+    
+    if [[ -n "$RTL_ORIG_PROMPT_COMMAND" ]]; then
+        PROMPT_COMMAND="RTL_PROMPT_COMMAND; $RTL_ORIG_PROMPT_COMMAND"
+    else
+        PROMPT_COMMAND="RTL_PROMPT_COMMAND"
+    fi
+    
+# ZSH-specific setup  
+elif [[ -n "$ZSH_VERSION" ]]; then
+    RTL_zsh_preexec() {
+        local cmd="$1"
+        if should_log_command "$cmd" 2>/dev/null; then
+            RTL_CMD_START_TIME="$(date '+%Y-%m-%d %H:%M:%S')"
+            write_verbose_header "$cmd" "$RTL_CMD_START_TIME"
+        fi
+    }
+    
+    RTL_zsh_precmd() {
+        if [[ "$RTL_INTERNAL_LOGGING" == "false" ]]; then
+            return 0
+        fi
+        
+        local cmd=$(fc -ln -1 2>/dev/null)
+        
+        if should_log_command "$cmd" 2>/dev/null; then
+            local end_time="$(date '+%Y-%m-%d %H:%M:%S')"
+            local start_time="${RTL_CMD_START_TIME:-$end_time}"
+            
+            RTL_log_command "$cmd" "$start_time" "$end_time"
+        fi
+        
+        RTL_CMD_START_TIME=""
+    }
+    
+    if autoload -Uz add-zsh-hook 2>/dev/null; then
+        add-zsh-hook preexec RTL_zsh_preexec 2>/dev/null || true
+        add-zsh-hook precmd RTL_zsh_precmd 2>/dev/null || true
+    fi
+fi
+
+# Mark as active
+echo "$$" > "__LOG_MARKER__-${PANE_ID}"
+echo "Enhanced Ops Logger with verbose integration installed for pane $PANE_ID" >&2
+EOF
+
+    # Replace placeholders
+    sed -i "s|__CSV_LOG__|$csv_log|g" "$hook_script"
+    sed -i "s|__VERBOSE_LOG__|$verbose_log|g" "$hook_script"
+    sed -i "s|__PANE_ID__|$pane_id|g" "$hook_script"
+    sed -i "s|__LOG_MARKER__|$LOG_MARKER|g" "$hook_script"
+    sed -i "s|__VERBOSE_CMD_MARKER__|$VERBOSE_CMD_MARKER|g" "$hook_script"
+    
+    chmod +x "$hook_script"
+}
+
+# Start unified verbose logging
+# Start unified verbose logging (add delay for stability)
+start_unified_verbose_logging() {
+    local id="$1"
+    local tmux_pane_ref="$2"
+    local target="$3"
+    local log_dir="$4"
+    
+    # Create master log file
+    local master_log=$(create_master_verbose_log "$target" "$log_dir")
+    
+    # Create filter script
+    local filter_script=$(create_verbose_filter_script)
+    
+    log_debug "Starting unified verbose logging to: $master_log"
+    
+    # Use pipe-pane with our filter script
+    tmux pipe-pane -t "$tmux_pane_ref" "bash '$filter_script' '$master_log' '$id' '$target' '$VERBOSE_CMD_MARKER'"
+    
+    # Give pipe-pane time to establish
+    sleep 0.5
+    
+    # Check if logging started successfully
+    if tmux list-panes -F "#{pane_id} #{pane_pipe}" | grep -q "$tmux_pane_ref.*1"; then
+        log_debug "Unified verbose logging started successfully"
+        
+        # Store filter script path for cleanup
+        echo "$filter_script" > "/tmp/ops-filter-script-${id}"
+        
+        return 0
+    else
+        log_debug "ERROR: Unified verbose logging failed to start"
+        rm -f "$filter_script"
+        return 1
+    fi
+}
+
+# Stop unified verbose logging
+stop_unified_verbose_logging() {
+    local tmux_pane_ref="$1"
+    local id="$2"
+    
+    # Stop pipe-pane
     tmux pipe-pane -t "$tmux_pane_ref" 2>/dev/null || true
     
-    log_debug "Stopped verbose logging for pane: $tmux_pane_ref"
+    # Clean up filter script
+    if [[ -f "/tmp/ops-filter-script-${id}" ]]; then
+        local filter_script=$(cat "/tmp/ops-filter-script-${id}")
+        rm -f "$filter_script" 2>/dev/null
+        rm -f "/tmp/ops-filter-script-${id}"
+    fi
+    
+    # Clean up markers
+    rm -f "${VERBOSE_CMD_MARKER}-${id}" 2>/dev/null
+    rm -f "/tmp/ops-cmd-active-${id}" 2>/dev/null
+    
+    log_debug "Stopped unified verbose logging for pane: $tmux_pane_ref"
 }
 
 # ================================================================
@@ -646,84 +995,74 @@ clear_window_indicators() {
 # MAIN LOGGING FUNCTIONS
 # ================================================================
 
-# Better logging installation 
+# Enhanced logging installation with unified verbose logging
 install_logging() {
     local id="$1"
     local csv_log="$2"
     local target="$3"
     local log_dir="$4"
     
-    log_debug "Installing logging for pane $id"
+    log_debug "Installing enhanced logging for pane $id"
     
     if is_tmux; then
         local tmux_pane_ref=$(get_tmux_pane_ref)
         
-        # Check for required dependencies, but continue even if missing
-        check_dependencies "$id"
+        # Get master verbose log path
+        local master_log=$(create_master_verbose_log "$target" "$log_dir")
         
-        # Get verbose log path
-        local verbose_log=$(create_verbose_log_with_header "$target" "$log_dir")
-        
-        # Start verbose logging with integrated header
-        if check_tmux_logging_installed; then
-            if start_verbose_logging "$id" "$tmux_pane_ref" "$target" "$log_dir"; then
-                log_debug "Verbose logging started successfully"
-            else
-                log_debug "Verbose logging may not have started correctly, continuing with CSV only"
-            fi
+        # Start unified verbose logging
+        if start_unified_verbose_logging "$id" "$tmux_pane_ref" "$target" "$log_dir"; then
+            log_debug "Unified verbose logging started successfully"
         else
-            log_debug "Skipping verbose logging (plugin not available)"
+            log_debug "Verbose logging failed, continuing with CSV only"
         fi
         
-        # Create command hook for CSV logging with verbose log path
+        # Create enhanced command hook
         local hook_script="/tmp/ops-hook-${id}.sh"
-        create_command_hook "$hook_script" "$csv_log" "$id" "$verbose_log"
+        create_enhanced_command_hook "$hook_script" "$csv_log" "$id" "$master_log"
         
-        # Better sourcing with comprehensive error handling
-        tmux send-keys -t "$tmux_pane_ref" "source '$hook_script' 2>/dev/null && echo 'Logging hooks installed successfully' || echo 'Logging may have warnings but is active'" ENTER
+        # Install the hook
+        tmux send-keys -t "$tmux_pane_ref" "source '$hook_script' 2>/dev/null && echo 'Enhanced logging hooks installed successfully' || echo 'Logging may have warnings but is active'" ENTER
         
-        sleep 2  # Give more time for hooks to install
+        sleep 2
         
-        # Set window indicator (ohmytmux compatible)
+        # Set window indicator
         set_window_logging_indicator "$tmux_pane_ref"
         
-        # Mark logging as active
+        # Mark as active
         touch "${LOG_MARKER}-${id}"
         touch "${LOG_MARKER}-${id}.success"
         
-        
     else
-        # Direct shell logging (CSV only - no verbose logging available)
+        # Direct shell logging (CSV only)
         local hook_script="/tmp/ops-hook-${id}.sh"
-        create_command_hook "$hook_script" "$csv_log" "$id" ""
+        create_enhanced_command_hook "$hook_script" "$csv_log" "$id" ""
         source "$hook_script"
-        echo "Direct shell logging started (CSV only - install tmux for verbose logging)"
+        echo "Direct shell logging started (CSV only)"
         
-        # Mark logging as active
         touch "${LOG_MARKER}-${id}"
         touch "${LOG_MARKER}-${id}.success"
     fi
     
-    log_debug "Logging installation completed"
+    log_debug "Enhanced logging installation completed"
 }
 
-# Clean removal of all logging
+# Enhanced removal function
 remove_logging() {
     local id="$1"
     
-    log_debug "Removing logging for pane $id"
+    log_debug "Removing enhanced logging for pane $id"
     
     if is_tmux; then
         local tmux_pane_ref=$(get_tmux_pane_ref)
         
-        # Stop verbose logging
-        stop_verbose_logging "$tmux_pane_ref" "$id"
+        # Stop unified verbose logging
+        stop_unified_verbose_logging "$tmux_pane_ref" "$id"
         
-        # Better cleanup script
+        # Clean up command hooks (same as before)
         local cleanup_script="/tmp/ops-cleanup-${id}.sh"
         cat > "$cleanup_script" << 'EOF'
 #!/usr/bin/env bash
-# Clean removal of logging hooks
 set +e
 
 if [[ -n "$BASH_VERSION" ]]; then
@@ -744,22 +1083,20 @@ fi
 unset RTL_CMD_START_TIME RTL_LAST_COMMAND RTL_LAST_HISTNUM RTL_INTERNAL_LOGGING 2>/dev/null
 unset CSV_LOG VERBOSE_LOG PANE_ID PUBLIC_IP VERBOSE_CMD_MARKER 2>/dev/null
 
-echo "Ops Logger hooks removed"
+echo "Enhanced Ops Logger hooks removed"
 EOF
         chmod +x "$cleanup_script"
         
-        # Source the cleanup script silently
         tmux send-keys -t "$tmux_pane_ref" "source '$cleanup_script' 2>/dev/null; rm -f '$cleanup_script'" ENTER
         
-        # Clear window indicators (ohmytmux compatible)
+        # Clear window indicators
         clear_window_indicators "$tmux_pane_ref"
         
-        # Cleanup temp files
+        # Clean up temp files
         rm -f "/tmp/ops-hook-${id}.sh"
-        rm -f "${VERBOSE_CMD_MARKER}-${id}"
         
     else
-        # Direct shell cleanup
+        # Direct shell cleanup (same as before)
         if [[ -n "$BASH_VERSION" ]]; then
             trap - DEBUG 2>/dev/null
             if [[ -n "$RTL_ORIG_PROMPT_COMMAND" ]]; then
@@ -775,17 +1112,14 @@ EOF
             unset -f RTL_zsh_preexec RTL_zsh_precmd RTL_log_command should_log_command write_verbose_header 2>/dev/null
         fi
         
-        unset RTL_CMD_START_TIME RTL_LAST_COMMAND RTL_LAST_HISTNUM RTL_INTERNAL_LOGGING 2>/dev/null
-        unset CSV_LOG VERBOSE_LOG PANE_ID PUBLIC_IP VERBOSE_CMD_MARKER 2>/dev/null
-        
         echo "Direct shell logging stopped"
     fi
     
-    # Remove markers and temp files
+    # Remove markers
     rm -f "${LOG_MARKER}-${id}" "${LOG_MARKER}-${id}.success"
     rm -f "/tmp/ops-hook-${id}.sh"
     
-    log_debug "Logging removal completed"
+    log_debug "Enhanced logging removal completed"
 }
 
 # ================================================================
@@ -1421,6 +1755,12 @@ main() {
         --config)            create_config ;;
         --save-config)       save_config_from_tmux ;;
         --status)            show_status ;;
+        --debug-pipe)        
+            load_config || { TARGET_NAME="$DEFAULT_TARGET"; LOG_DIR="$DEFAULT_LOG_DIR"; }
+            local id=$(get_pane_id)
+            local tmux_pane_ref=$(get_tmux_pane_ref)
+            start_debug_verbose_logging "$id" "$tmux_pane_ref" "$TARGET_NAME" "$LOG_DIR"
+            ;;
         --debug-on)          [[ -f "$CONFIG_FILE" ]] && { load_config; DEBUG=true; save_config; } || echo "Run --config first to set up configuration"; echo "Debug logging enabled" ;;
         --debug-off)         [[ -f "$CONFIG_FILE" ]] && { load_config; DEBUG=false; save_config; } || echo "Run --config first to set up configuration"; echo "Debug logging disabled" ;;
         --help|'')           show_help ;;
