@@ -456,96 +456,6 @@ EOF
     echo "$log_file"
 }
 
-# Process verbose output to add command headers
-create_verbose_processor() {
-    local processor_script="$1"
-    local verbose_log="$2"
-    local pane_id="$3"
-    
-    cat > "$processor_script" << 'EOF'
-#!/usr/bin/env bash
-# Verbose output processor
-
-VERBOSE_LOG="__VERBOSE_LOG__"
-PANE_ID="__PANE_ID__"
-VERBOSE_CMD_MARKER="__VERBOSE_CMD_MARKER__"
-OUTPUT_BUFFER=""
-BUFFER_LINES=0
-MAX_BUFFER_LINES=1000
-
-# Function to write command header and buffered output
-write_command_section() {
-    local marker_file="${VERBOSE_CMD_MARKER}-${PANE_ID}"
-    
-    if [[ -f "$marker_file" ]]; then
-        # Read command info
-        IFS='|' read -r cmd start_time user path public_ip pane_id < "$marker_file"
-        rm -f "$marker_file"
-        
-        # Write formatted header
-        {
-            echo ""
-            echo "=============================================================================="
-            echo "COMMAND EXECUTION - $start_time"
-            echo "=============================================================================="
-            echo "Command: $cmd"
-            echo "User: $user"
-            echo "Path: $path"
-            echo "Start: $start_time"
-            echo "End: $(date '+%Y-%m-%d %H:%M:%S')"
-            echo "Pane: $pane_id"
-            echo "Public IP: $public_ip"
-            echo "------------------------------------------------------------------------------"
-            echo "OUTPUT:"
-        } >> "$VERBOSE_LOG"
-        
-        # Write buffered output
-        if [[ -n "$OUTPUT_BUFFER" ]]; then
-            echo -n "$OUTPUT_BUFFER" >> "$VERBOSE_LOG"
-            OUTPUT_BUFFER=""
-            BUFFER_LINES=0
-        fi
-        
-        echo "==============================================================================" >> "$VERBOSE_LOG"
-    fi
-}
-
-# Read from stdin and process
-while IFS= read -r line; do
-    # Remove ANSI escape sequences
-    clean_line=$(echo "$line" | sed -r 's/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g')
-    
-    # Add to buffer
-    OUTPUT_BUFFER="${OUTPUT_BUFFER}${clean_line}"$'\n'
-    ((BUFFER_LINES++))
-    
-    # Check if we have a new command marker
-    if [[ -f "${VERBOSE_CMD_MARKER}-${PANE_ID}" ]]; then
-        write_command_section
-    fi
-    
-    # Prevent buffer overflow
-    if [[ $BUFFER_LINES -gt $MAX_BUFFER_LINES ]]; then
-        echo -n "$OUTPUT_BUFFER" >> "$VERBOSE_LOG"
-        OUTPUT_BUFFER=""
-        BUFFER_LINES=0
-    fi
-done
-
-# Final flush
-if [[ -n "$OUTPUT_BUFFER" ]]; then
-    echo -n "$OUTPUT_BUFFER" >> "$VERBOSE_LOG"
-fi
-EOF
-
-    # Replace placeholders
-    sed -i "s|__VERBOSE_LOG__|$verbose_log|g" "$processor_script"
-    sed -i "s|__PANE_ID__|$pane_id|g" "$processor_script"
-    sed -i "s|__VERBOSE_CMD_MARKER__|$VERBOSE_CMD_MARKER|g" "$processor_script"
-    
-    chmod +x "$processor_script"
-}
-
 # Configure tmux-logging plugin settings for proper format
 configure_tmux_logging() {
     local log_file="$1"
@@ -575,17 +485,18 @@ start_verbose_logging() {
     # Create the log file with header
     local log_file=$(create_verbose_log_with_header "$target" "$log_dir")
     
-    # Create processor script
-    local processor_script="/tmp/ops-verbose-processor-${id}.sh"
-    create_verbose_processor "$processor_script" "$log_file" "$id"
-    
     # Configure tmux-logging to use our pre-created file
     configure_tmux_logging "$log_file" "$target"
     
-    # Setup direct pipe-pane with our processor
+    # Setup direct pipe-pane with ANSI filtering, appending to our header file
     log_debug "Starting verbose logging to: $log_file"
     
-    tmux pipe-pane -t "$tmux_pane_ref" "bash '$processor_script'"
+    if command -v ansifilter >/dev/null 2>&1; then
+        tmux pipe-pane -t "$tmux_pane_ref" "ansifilter >> '$log_file'"
+    else
+        # Improved ANSI filtering that preserves readability
+        tmux pipe-pane -t "$tmux_pane_ref" "sed -r 's/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g' >> '$log_file'"
+    fi
     
     # Check if logging started successfully
     if tmux list-panes -F "#{pane_id} #{pane_pipe}" | grep -q "$tmux_pane_ref.*1"; then
@@ -600,18 +511,73 @@ start_verbose_logging() {
 # Stop verbose logging
 stop_verbose_logging() {
     local tmux_pane_ref="$1"
-    local id="$2"
     
     # Direct pipe-pane stop method (most reliable)
     tmux pipe-pane -t "$tmux_pane_ref" 2>/dev/null || true
     
-    # Clean up processor script
-    rm -f "/tmp/ops-verbose-processor-${id}.sh"
-    
-    # Clean up any remaining command markers
-    rm -f "${VERBOSE_CMD_MARKER}-${id}"
-    
     log_debug "Stopped verbose logging for pane: $tmux_pane_ref"
+}
+
+# ================================================================
+# OHMYTMUX-COMPATIBLE WINDOW NAME MANAGEMENT
+# ================================================================
+
+# Improved window name handling that works with ohmytmux
+get_current_window_name() {
+    local tmux_pane_ref="$1"
+    local name=$(tmux display -t "$tmux_pane_ref" -p '#{window_name}')
+    
+    # Remove our indicators as well as any ohmytmux status indicators
+    name="${name#🔴 }"
+    name="${name#🎥 }"
+    name="${name#● }"
+    name="${name#⚠ }"
+    name="${name#▶ }"
+    
+    echo "$name"
+}
+
+set_window_logging_indicator() {
+    local tmux_pane_ref="$1"
+    local current_name=$(get_current_window_name "$tmux_pane_ref")
+    
+    # Preserve ohmytmux automatic formats but add our indicator
+    if [[ "$current_name" == *Z ]]; then
+        # Zoomed window format in ohmytmux
+        tmux rename-window -t "$tmux_pane_ref" "🔴 ${current_name%Z}Z"
+    else
+        tmux rename-window -t "$tmux_pane_ref" "🔴 $current_name"
+    fi
+}
+
+set_window_recording_indicator() {
+    local tmux_pane_ref="$1"
+    local current_name=$(get_current_window_name "$tmux_pane_ref")
+    
+    # Remove logging indicator if present and add recording
+    current_name="${current_name#🔴 }"
+    
+    # Preserve ohmytmux automatic formats
+    if [[ "$current_name" == *Z ]]; then
+        # Zoomed window format in ohmytmux
+        tmux rename-window -t "$tmux_pane_ref" "🎥 ${current_name%Z}Z"
+    else
+        tmux rename-window -t "$tmux_pane_ref" "🎥 $current_name"
+    fi
+}
+
+clear_window_indicators() {
+    local tmux_pane_ref="$1"
+    local current_name=$(tmux display -t "$tmux_pane_ref" -p '#{window_name}')
+    local clean_name=$(get_current_window_name "$tmux_pane_ref")
+    
+    # Preserve any ohmytmux indicators that might be present
+    if [[ "$current_name" == *Z ]]; then
+        # Zoomed window format in ohmytmux
+        tmux rename-window -t "$tmux_pane_ref" "${clean_name}Z"
+    else
+        tmux rename-window -t "$tmux_pane_ref" "$clean_name"
+    fi
 }
 
 # ================================================================
