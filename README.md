@@ -4,7 +4,7 @@ A comprehensive terminal logging solution for red team operations with tmux inte
 
 ## Info
 
-Currently the operator log csv works great. However, the venbose logging has a sync issue where if you run commands too quickly it may mix up output. The recording feature is still a work in progress
+**Version 2.5.3** - All major logging features are now working reliably! Command logging, verbose logging with proper command boundaries, and terminal recording are fully functional across bash/zsh environments with tmux integration.
 
 ## Overview
 
@@ -13,12 +13,14 @@ Ops Logger provides automated logging and recording of terminal sessions during 
 Key features:
 - **Shell-Agnostic**: Works with bash and zsh shells running inside tmux
 - **Command Logging**: Records all commands with timestamps, user, path, and output to CSV and verbose logs
+- **Fixed Verbose Logging**: Proper command boundary detection prevents output mixing
 - **Normalized Pane IDs**: Uses predictable session-window-pane format (e.g., `main-0-0`)
 - **Terminal Recording**: Supports asciinema recordings with fallback to basic frame capture
 - **tmux Integration**: Seamless integration with tmux including Oh My Tmux! configurations
 - **Visual Feedback**: Shows 🔴 logging and 🎥 recording indicators in window names
 - **Engagement-Aware**: Target-based organization for better log management
-- **Minimal ANSI Cleaning**: Preserves command output while removing terminal control sequences
+- **Enhanced Command Headers**: Verbose logs include formatted command execution headers
+- **Reliable Command Boundaries**: Fixed command mixing issues in verbose output
 
 ## Installation
 
@@ -50,7 +52,7 @@ chmod +x ops-logger.sh
 ### Command-Line Options
 
 ```
-Ops Terminal Logger - Professional Solution v2.1.3
+Red Team Terminal Logger - Professional Solution v2.5.3
 ======================================================
 USAGE: ./ops-logger.sh [OPTIONS]
 
@@ -82,7 +84,14 @@ DEBUG:
 
 TMUX INTEGRATION:
   Keys: prefix+L (toggle logging), prefix+R (recording)
+  Compatible with ohmytmux themes and window naming
   Auto-prompts for new windows/panes (configurable)
+
+VERSION 2.5.3 FEATURES:
+  - FIXED: Verbose logs now have proper command boundaries
+  - FIXED: Commands no longer mix output between executions
+  - FIXED: Enhanced command headers with full context
+  - IMPROVED: Better separation of capture and formatting
 ```
 
 ### Key Bindings
@@ -92,7 +101,48 @@ Once installed, the following tmux key bindings are available:
 - **Prefix + L**: Toggle command logging for the current pane
 - **Prefix + R**: Toggle terminal recording for the current pane
 
-Note: "Prefix" refers to your tmux prefix key (default: Ctrl+b).
+Note: "Prefix" refers to your tmux prefix key (default: Ctrl+b, often Ctrl+a with Oh My Tmux!).
+
+## What's New in 2.5.3
+
+### Major Fixes
+- **Fixed Command Boundary Detection**: Verbose logs no longer mix command output
+- **Enhanced Command Headers**: Each command execution now has properly formatted headers
+- **Improved Filter Logic**: Better separation between command capture and output formatting
+- **Reliable Command Closure**: Commands are properly closed when new ones begin
+
+### Enhanced Verbose Log Format
+
+Commands are now cleanly separated with proper headers:
+```
+==============================================================================
+COMMAND EXECUTION - 2025-06-11 21:59:56
+==============================================================================
+Command: pwd
+User: n0mad1k
+Path: /home/n0mad1k
+Start: 2025-06-11 21:59:56
+Pane: 0-1-1
+Public IP: 98.98.163.173
+------------------------------------------------------------------------------
+OUTPUT:
+21:59:56 /home/n0mad1k
+==============================================================================
+
+==============================================================================
+COMMAND EXECUTION - 2025-06-11 21:59:59
+==============================================================================
+Command: whoami
+User: n0mad1k
+Path: /home/n0mad1k
+Start: 2025-06-11 21:59:59
+Pane: 0-1-1
+Public IP: 98.98.163.173
+------------------------------------------------------------------------------
+OUTPUT:
+21:59:59 n0mad1k
+==============================================================================
+```
 
 ## tmux Configuration Compatibility
 
@@ -140,7 +190,7 @@ Reconfigure at any time with:
 1. Start tmux: `tmux`
 2. Press `Prefix + L` to start logging
 3. Window title shows 🔴 indicator when logging is active
-4. All commands and outputs are automatically logged
+4. All commands and outputs are automatically logged with proper boundaries
 5. Logs saved to `~/OperationLogs/`
 
 ### Recording Remote Sessions
@@ -197,7 +247,7 @@ The tool hooks into shell command execution and tmux output capture, making it w
 ~/OperationLogs/
 ├── target-name_commands_YYYY-MM-DD.csv        # CSV command log
 ├── verbose/
-│   └── target-name_verbose_YYYY-MM-DD.log     # Detailed command/output logs
+│   └── target-name_master_YYYYMMDD.log        # Master verbose log with headers
 └── recordings/
     ├── target-name_main-0-0_YYYYMMDD_HHMMSS.cast      # Asciinema files
     └── target-name_main-0-0_YYYYMMDD_HHMMSS/           # Basic recordings
@@ -210,29 +260,25 @@ The tool hooks into shell command execution and tmux output capture, making it w
 The CSV log contains essential command information:
 ```csv
 "StartTime","EndTime","SourceIP","User","Path","Command"
-"2023-12-01 10:30:15","2023-12-01 10:30:16","192.168.1.100","user","/home/user","ls -la"
+"2025-06-11 21:59:56","2025-06-11 21:59:59","98.98.163.173","n0mad1k","/home/n0mad1k","pwd"
 ```
 
 ### Verbose Log Format
 
-Detailed logs with command context and output:
+Detailed logs with command context and clean output separation:
 ```
 ==============================================================================
-COMMAND EXECUTION - 2023-12-01 10:30:15
+COMMAND EXECUTION - 2025-06-11 21:59:56
 ==============================================================================
-Command: ls -la
-User: user
-Path: /home/user
-Start: 2023-12-01 10:30:15
-End: 2023-12-01 10:30:16
-Pane: main-0-0
-Public IP: 192.168.1.100
+Command: pwd
+User: n0mad1k
+Path: /home/n0mad1k
+Start: 2025-06-11 21:59:56
+Pane: 0-1-1
+Public IP: 98.98.163.173
 ------------------------------------------------------------------------------
 OUTPUT:
-total 48
-drwxr-xr-x 7 user user 4096 Dec  1 10:30 .
-drwxr-xr-x 3 root root 4096 Nov 30 15:20 ..
--rw-r--r-- 1 user user  220 Nov 30 15:20 .bash_logout
+21:59:56 /home/n0mad1k
 ==============================================================================
 ```
 
@@ -302,7 +348,12 @@ Ops Logger provides visual feedback through tmux window names:
    # (automatically falls back)
    ```
 
-4. **Permission issues:**
+4. **Command boundary issues:**
+   - Version 2.5.3 fixes most boundary detection problems
+   - Enable debug mode if commands still appear mixed
+   - Check for unusual prompt configurations
+
+5. **Permission issues:**
    ```bash
    # Check log directory permissions
    ls -la ~/OperationLogs/
@@ -354,6 +405,7 @@ Ops Logger is designed to be lightweight:
 - Output buffering prevents excessive I/O
 - Configurable recording intervals for basic recording mode
 - Automatic cleanup of temporary files
+- Efficient command boundary detection
 
 ## Contributing
 
@@ -379,4 +431,3 @@ This tool is intended for authorized red team operations only. Users are respons
 - Using the tool ethically and responsibly
 
 Ops Logger captures and stores everything typed and displayed in terminal sessions. Exercise appropriate caution when handling the resulting log files.
-
