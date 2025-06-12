@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # OpsLogger - Complete logging solution for red team operations
-# Version 2.5.1 - Fixed tmux popup issues
+# Version 2.5.3 - Merged config and prompt fixes
 
 # Configuration variables
 CONFIG_FILE="${HOME}/.ops-logger.conf"
@@ -14,6 +14,7 @@ DEBUG=false
 LOG_MARKER="/tmp/ops-logger-active"
 RECORDING_MARKER="/tmp/ops-logger-recording"
 CONFIG_IN_PROGRESS="/tmp/ops-logger-configuring"
+VERBOSE_CMD_MARKER="/tmp/ops-logger-cmd"
 
 # Helper functions
 log_debug() {
@@ -69,10 +70,18 @@ is_tmux() { [[ -n "$TMUX" ]]; }
 # Get normalized pane ID (session-window-pane format)
 get_pane_id() {
     if is_tmux; then
-        local session=$(tmux display -p '#{session_name}')
-        local window=$(tmux display -p '#{window_index}')
-        local pane=$(tmux display -p '#{pane_index}')
-        echo "${session}-${window}-${pane}"
+        # If TMUX_PANE is set (from hook), use that specific pane
+        if [[ -n "$TMUX_PANE" ]]; then
+            local session=$(tmux display -t "$TMUX_PANE" -p '#{session_name}')
+            local window=$(tmux display -t "$TMUX_PANE" -p '#{window_index}')
+            local pane=$(tmux display -t "$TMUX_PANE" -p '#{pane_index}')
+            echo "${session}-${window}-${pane}"
+        else
+            local session=$(tmux display -p '#{session_name}')
+            local window=$(tmux display -p '#{window_index}')
+            local pane=$(tmux display -p '#{pane_index}')
+            echo "${session}-${window}-${pane}"
+        fi
     else
         echo "$$"
     fi
@@ -81,7 +90,12 @@ get_pane_id() {
 # Get tmux pane reference for tmux commands (% format for tmux commands)
 get_tmux_pane_ref() {
     if is_tmux; then
-        tmux display -p '#{pane_id}'
+        # If TMUX_PANE is set (from hook), use that specific pane
+        if [[ -n "$TMUX_PANE" ]]; then
+            echo "$TMUX_PANE"
+        else
+            tmux display -p '#{pane_id}'
+        fi
     else
         echo ""
     fi
@@ -91,10 +105,21 @@ get_tmux_pane_ref() {
 get_tmux_prefix() {
     # First check if we're using oh-my-tmux which often uses C-a
     if tmux show-options -g | grep -q "TMUX_CONF"; then
-        echo "C-a"
+        # Check if prefix has been overridden in .local config
+        local prefix=$(tmux show-options -g prefix 2>/dev/null | awk '{print $2}')
+        if [[ -n "$prefix" ]]; then
+            case "$prefix" in
+                "C-q") echo "C-q" ;;
+                "C-a") echo "C-a" ;;
+                "C-b") echo "C-b" ;;
+                *) echo "$prefix" ;;
+            esac
+        else
+            echo "C-a"  # oh-my-tmux default
+        fi
     else
         # Try to get the actual prefix from tmux config
-        local prefix=$(tmux show-options -g prefix 2>/dev/null | cut -d' ' -f2)
+        local prefix=$(tmux show-options -g prefix 2>/dev/null | awk '{print $2}')
         if [[ -n "$prefix" ]]; then
             echo "$prefix"
         else
@@ -217,6 +242,7 @@ create_command_hook() {
     local hook_script="$1"
     local csv_log="$2"
     local pane_id="$3"
+    local verbose_log="$4"
     
     cat > "$hook_script" << 'EOF'
 #!/usr/bin/env bash
@@ -227,10 +253,12 @@ set +e
 
 # Set variables first before anything else
 CSV_LOG="__CSV_LOG__"
+VERBOSE_LOG="__VERBOSE_LOG__"
 PANE_ID="__PANE_ID__"
 PUBLIC_IP=$(timeout 5 curl -s ifconfig.me 2>/dev/null || echo "unknown")
 RTL_INTERNAL_LOGGING=true
 RTL_CMD_START_TIME=""
+VERBOSE_CMD_MARKER="__VERBOSE_CMD_MARKER__"
 
 # Function to check if command should be logged
 should_log_command() {
@@ -241,6 +269,17 @@ should_log_command() {
         "") return 1 ;;
         *) return 0 ;;
     esac
+}
+
+# Function to write verbose command header
+write_verbose_header() {
+    local cmd="$1"
+    local start_time="$2"
+    local user=$(whoami)
+    local path=$(pwd)
+    
+    # Create a marker file with command info for the verbose processor
+    echo "$cmd|$start_time|$user|$path|$PUBLIC_IP|$PANE_ID" > "${VERBOSE_CMD_MARKER}-${PANE_ID}"
 }
 
 # Function to log command to CSV
@@ -277,6 +316,7 @@ if [[ -n "$BASH_VERSION" ]]; then
         local cmd="$BASH_COMMAND"
         if should_log_command "$cmd" 2>/dev/null; then
             RTL_CMD_START_TIME="$(date '+%Y-%m-%d %H:%M:%S')"
+            write_verbose_header "$cmd" "$RTL_CMD_START_TIME"
         fi
     }
     
@@ -321,6 +361,7 @@ elif [[ -n "$ZSH_VERSION" ]]; then
         local cmd="$1"
         if should_log_command "$cmd" 2>/dev/null; then
             RTL_CMD_START_TIME="$(date '+%Y-%m-%d %H:%M:%S')"
+            write_verbose_header "$cmd" "$RTL_CMD_START_TIME"
         fi
     }
     
@@ -355,8 +396,10 @@ EOF
 
     # Replace placeholders with actual values
     sed -i "s|__CSV_LOG__|$csv_log|g" "$hook_script"
+    sed -i "s|__VERBOSE_LOG__|$verbose_log|g" "$hook_script"
     sed -i "s|__PANE_ID__|$pane_id|g" "$hook_script"
     sed -i "s|__LOG_MARKER__|$LOG_MARKER|g" "$hook_script"
+    sed -i "s|__VERBOSE_CMD_MARKER__|$VERBOSE_CMD_MARKER|g" "$hook_script"
     
     chmod +x "$hook_script"
 }
@@ -538,6 +581,68 @@ clear_window_indicators() {
 }
 
 # ================================================================
+# OHMYTMUX-COMPATIBLE WINDOW NAME MANAGEMENT
+# ================================================================
+
+# Improved window name handling that works with ohmytmux
+get_current_window_name() {
+    local tmux_pane_ref="$1"
+    local name=$(tmux display -t "$tmux_pane_ref" -p '#{window_name}')
+    
+    # Remove our indicators as well as any ohmytmux status indicators
+    name="${name#🔴 }"
+    name="${name#🎥 }"
+    name="${name#● }"
+    name="${name#⚠ }"
+    name="${name#▶ }"
+    
+    echo "$name"
+}
+
+set_window_logging_indicator() {
+    local tmux_pane_ref="$1"
+    local current_name=$(get_current_window_name "$tmux_pane_ref")
+    
+    # Preserve ohmytmux automatic formats but add our indicator
+    if [[ "$current_name" == *Z ]]; then
+        # Zoomed window format in ohmytmux
+        tmux rename-window -t "$tmux_pane_ref" "🔴 ${current_name%Z}Z"
+    else
+        tmux rename-window -t "$tmux_pane_ref" "🔴 $current_name"
+    fi
+}
+
+set_window_recording_indicator() {
+    local tmux_pane_ref="$1"
+    local current_name=$(get_current_window_name "$tmux_pane_ref")
+    
+    # Remove logging indicator if present and add recording
+    current_name="${current_name#🔴 }"
+    
+    # Preserve ohmytmux automatic formats
+    if [[ "$current_name" == *Z ]]; then
+        # Zoomed window format in ohmytmux
+        tmux rename-window -t "$tmux_pane_ref" "🎥 ${current_name%Z}Z"
+    else
+        tmux rename-window -t "$tmux_pane_ref" "🎥 $current_name"
+    fi
+}
+
+clear_window_indicators() {
+    local tmux_pane_ref="$1"
+    local current_name=$(tmux display -t "$tmux_pane_ref" -p '#{window_name}')
+    local clean_name=$(get_current_window_name "$tmux_pane_ref")
+    
+    # Preserve any ohmytmux indicators that might be present
+    if [[ "$current_name" == *Z ]]; then
+        # Zoomed window format in ohmytmux
+        tmux rename-window -t "$tmux_pane_ref" "${clean_name}Z"
+    else
+        tmux rename-window -t "$tmux_pane_ref" "$clean_name"
+    fi
+}
+
+# ================================================================
 # MAIN LOGGING FUNCTIONS
 # ================================================================
 
@@ -556,6 +661,9 @@ install_logging() {
         # Check for required dependencies, but continue even if missing
         check_dependencies "$id"
         
+        # Get verbose log path
+        local verbose_log=$(create_verbose_log_with_header "$target" "$log_dir")
+        
         # Start verbose logging with integrated header
         if check_tmux_logging_installed; then
             if start_verbose_logging "$id" "$tmux_pane_ref" "$target" "$log_dir"; then
@@ -567,9 +675,9 @@ install_logging() {
             log_debug "Skipping verbose logging (plugin not available)"
         fi
         
-        # Create command hook for CSV logging
+        # Create command hook for CSV logging with verbose log path
         local hook_script="/tmp/ops-hook-${id}.sh"
-        create_command_hook "$hook_script" "$csv_log" "$id"
+        create_command_hook "$hook_script" "$csv_log" "$id" "$verbose_log"
         
         # Better sourcing with comprehensive error handling
         tmux send-keys -t "$tmux_pane_ref" "source '$hook_script' 2>/dev/null && echo 'Logging hooks installed successfully' || echo 'Logging may have warnings but is active'" ENTER
@@ -587,7 +695,7 @@ install_logging() {
     else
         # Direct shell logging (CSV only - no verbose logging available)
         local hook_script="/tmp/ops-hook-${id}.sh"
-        create_command_hook "$hook_script" "$csv_log" "$id"
+        create_command_hook "$hook_script" "$csv_log" "$id" ""
         source "$hook_script"
         echo "Direct shell logging started (CSV only - install tmux for verbose logging)"
         
@@ -609,7 +717,7 @@ remove_logging() {
         local tmux_pane_ref=$(get_tmux_pane_ref)
         
         # Stop verbose logging
-        stop_verbose_logging "$tmux_pane_ref"
+        stop_verbose_logging "$tmux_pane_ref" "$id"
         
         # Better cleanup script
         local cleanup_script="/tmp/ops-cleanup-${id}.sh"
@@ -626,15 +734,15 @@ if [[ -n "$BASH_VERSION" ]]; then
     else
         unset PROMPT_COMMAND
     fi
-    unset -f RTL_PROMPT_COMMAND RTL_log_command should_log_command RTL_preexec 2>/dev/null
+    unset -f RTL_PROMPT_COMMAND RTL_log_command should_log_command RTL_preexec write_verbose_header 2>/dev/null
 elif [[ -n "$ZSH_VERSION" ]]; then
     add-zsh-hook -d preexec RTL_zsh_preexec 2>/dev/null
     add-zsh-hook -d precmd RTL_zsh_precmd 2>/dev/null
-    unset -f RTL_zsh_preexec RTL_zsh_precmd RTL_log_command should_log_command 2>/dev/null
+    unset -f RTL_zsh_preexec RTL_zsh_precmd RTL_log_command should_log_command write_verbose_header 2>/dev/null
 fi
 
 unset RTL_CMD_START_TIME RTL_LAST_COMMAND RTL_LAST_HISTNUM RTL_INTERNAL_LOGGING 2>/dev/null
-unset CSV_LOG PANE_ID PUBLIC_IP 2>/dev/null
+unset CSV_LOG VERBOSE_LOG PANE_ID PUBLIC_IP VERBOSE_CMD_MARKER 2>/dev/null
 
 echo "Ops Logger hooks removed"
 EOF
@@ -648,6 +756,7 @@ EOF
         
         # Cleanup temp files
         rm -f "/tmp/ops-hook-${id}.sh"
+        rm -f "${VERBOSE_CMD_MARKER}-${id}"
         
     else
         # Direct shell cleanup
@@ -659,15 +768,15 @@ EOF
             else
                 unset PROMPT_COMMAND
             fi
-            unset -f RTL_PROMPT_COMMAND RTL_log_command should_log_command RTL_preexec 2>/dev/null
+            unset -f RTL_PROMPT_COMMAND RTL_log_command should_log_command RTL_preexec write_verbose_header 2>/dev/null
         elif [[ -n "$ZSH_VERSION" ]]; then
             add-zsh-hook -d preexec RTL_zsh_preexec 2>/dev/null
             add-zsh-hook -d precmd RTL_zsh_precmd 2>/dev/null
-            unset -f RTL_zsh_preexec RTL_zsh_precmd RTL_log_command should_log_command 2>/dev/null
+            unset -f RTL_zsh_preexec RTL_zsh_precmd RTL_log_command should_log_command write_verbose_header 2>/dev/null
         fi
         
         unset RTL_CMD_START_TIME RTL_LAST_COMMAND RTL_LAST_HISTNUM RTL_INTERNAL_LOGGING 2>/dev/null
-        unset CSV_LOG PANE_ID PUBLIC_IP 2>/dev/null
+        unset CSV_LOG VERBOSE_LOG PANE_ID PUBLIC_IP VERBOSE_CMD_MARKER 2>/dev/null
         
         echo "Direct shell logging stopped"
     fi
@@ -776,11 +885,10 @@ stop_recording() {
 # CONFIGURATION FUNCTIONS
 # ================================================================
 
-# FIXED: Configuration that actually prompts the user and doesn't continue logging
 create_config() {
     local is_first_run="${1:-false}"
     
-    # If this is a first run from ensure_config, we need to get input via tmux command-prompt
+    # If this is a first run from ensure_config in tmux, use the local version's approach
     if [[ "$is_first_run" == "true" ]] && is_tmux; then
         # Mark configuration as in progress
         touch "$CONFIG_IN_PROGRESS"
@@ -821,9 +929,7 @@ DEBUG=$DEBUG
 EOF
 
 # Create directories
-mkdir -p "$LOG_DIR"
-mkdir -p "${LOG_DIR}/verbose"
-mkdir -p "${LOG_DIR}/recordings"
+mkdir -p "$LOG_DIR" "$LOG_DIR/verbose" "$LOG_DIR/recordings"
 
 # Remove the in-progress marker
 rm -f "/tmp/ops-logger-configuring"
@@ -846,69 +952,57 @@ EOSCRIPT
         return 0
     fi
     
-    # For manual --config or non-tmux environments
-    load_config
-    
-    echo "Red Team Terminal Logger - Configuration"
-    echo "========================================"
+    # For manual --config or non-tmux environments (GitHub version approach)
+    echo "Red Team Terminal Logger - First Time Setup"
+    echo "==========================================="
     echo ""
-    
-    echo "Current settings:"
+
+    CONFIG_FILE="${HOME}/.ops-logger.conf"
+    DEFAULT_TARGET="target-$(hostname | tr '.' '-')"
+    DEFAULT_LOG_DIR="${HOME}/OperationLogs"
+
+    # Detect whether we're in a tty
+    if [[ ! -t 0 ]]; then
+        echo "Error: Cannot prompt user in non-interactive shell."
+        return 1
+    fi
+
+    read -p "Enter target name [$DEFAULT_TARGET]: " TARGET_NAME
+    TARGET_NAME="${TARGET_NAME:-$DEFAULT_TARGET}"
+
+    read -p "Enter log directory [$DEFAULT_LOG_DIR]: " LOG_DIR
+    LOG_DIR="${LOG_DIR:-$DEFAULT_LOG_DIR}"
+
+    read -p "Prompt for logging in new shells? [Y/n]: " PROMPT_NEW_SHELLS
+    [[ "${PROMPT_NEW_SHELLS,,}" == "n" ]] && PROMPT_NEW_SHELLS=false || PROMPT_NEW_SHELLS=true
+
+    read -p "Enable debug logging? [y/N]: " DEBUG
+    [[ "${DEBUG,,}" == "y" ]] && DEBUG=true || DEBUG=false
+
+    # Save config
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    cat > "$CONFIG_FILE" <<EOF
+# Ops Logger Configuration
+TARGET_NAME="$TARGET_NAME"
+LOG_DIR="$LOG_DIR"
+PROMPT_NEW_SHELLS=$PROMPT_NEW_SHELLS
+RECORD_INTERVAL=0.5
+DEBUG=$DEBUG
+EOF
+
+    mkdir -p "$LOG_DIR" "$LOG_DIR/verbose" "$LOG_DIR/recordings"
+
+    echo ""
+    echo "Configuration saved!"
     echo "  Target name: $TARGET_NAME"
     echo "  Log directory: $LOG_DIR"
     echo "  Prompt new shells: $PROMPT_NEW_SHELLS"
     echo "  Debug mode: $DEBUG"
     echo ""
-    
-    # Use proper input handling
-    local input_source="/dev/tty"
-    [[ ! -e "$input_source" ]] && input_source="/dev/stdin"
-    
-    echo -n "Enter target name [$TARGET_NAME]: "
-    read -r input < "$input_source"
-    [[ -n "$input" ]] && TARGET_NAME="$input"
-    
-    echo -n "Enter log directory [$LOG_DIR]: "
-    read -r input < "$input_source"
-    [[ -n "$input" ]] && LOG_DIR="$input"
-    
-    echo -n "Prompt for logging in new shells? [Y/n]: "
-    read -r input < "$input_source"
-    [[ "${input,,}" == "n" ]] && PROMPT_NEW_SHELLS=false || PROMPT_NEW_SHELLS=true
-    
-    echo -n "Enable debug logging? [y/N]: "
-    read -r input < "$input_source"
-    [[ "${input,,}" == "y" ]] && DEBUG=true || DEBUG=false
-    
-    save_config
-    
-    echo ""
-    echo "Configuration saved!"
-    echo "New settings:"
-    echo "  Target name: $TARGET_NAME"
-    echo "  Log directory: $LOG_DIR" 
-    echo "  Prompt new shells: $PROMPT_NEW_SHELLS"
-    echo "  Debug mode: $DEBUG"
-    
-    # Create directories
-    ensure_dir "$LOG_DIR"
-    ensure_dir "${LOG_DIR}/verbose"
-    ensure_dir "${LOG_DIR}/recordings"
-    
-    if is_tmux; then
-        echo "Configuration saved: $TARGET_NAME"
-    fi
+    echo "Now run: prefix+L to start logging (or ops-logger --start)"
 }
 
-save_config_from_tmux() {
-    save_config
-    ensure_dir "$LOG_DIR"
-    ensure_dir "${LOG_DIR}/verbose"
-    ensure_dir "${LOG_DIR}/recordings"
-    echo "Configuration saved"
-}
-
-# FIXED: Ensure config exists and abort if we're in the middle of configuring
+# Keep the ensure_config from local version
 ensure_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
         create_config "true"
@@ -991,44 +1085,169 @@ toggle_recording() {
 }
 
 prompt_for_logging() {
-    local id=$(get_pane_id)
-    is_logging_active "$id" && return 0
-    
-    load_config
-    [[ "$PROMPT_NEW_SHELLS" != "true" ]] && return 0
-    
-    if is_tmux; then
-        tmux display-menu -T "Start logging this shell?" \
-            "Yes" y "run-shell \"$0 --start\"" \
-            "No" n ""
-    else
-        read -p "Start logging this shell? [Y/n] " response
-        [[ -z "$response" || "${response,,}" == "y" ]] && start_logging
+    local id
+    id=$(get_pane_id)
+
+    # ✅ Debug logging to see what's happening
+    echo "[$(date)] prompt_for_logging called for pane: $id" >> /tmp/ops-logger-prompt-debug.log
+    echo "[$(date)] TMUX_PANE: ${TMUX_PANE:-'not set'}" >> /tmp/ops-logger-prompt-debug.log
+
+    # ✅ Avoid recursion with a pane-specific lock - BUT with timeout
+    local lock_file="/tmp/ops-logger-prompted-${id}"
+    if [[ -f "$lock_file" ]]; then
+        # Check if lock file is stale (older than 30 seconds)
+        if [[ $(find "$lock_file" -mmin +0.5 2>/dev/null) ]]; then
+            echo "[$(date)] Removing stale lock file" >> /tmp/ops-logger-prompt-debug.log
+            rm -f "$lock_file"
+        else
+            echo "[$(date)] Recent lock file exists, returning" >> /tmp/ops-logger-prompt-debug.log
+            return 0
+        fi
     fi
+    touch "$lock_file"
+
+    # ✅ Cleanup function to ensure lock file is always removed
+    cleanup_lock() {
+        rm -f "$lock_file"
+        echo "[$(date)] Lock file cleaned up" >> /tmp/ops-logger-prompt-debug.log
+    }
+    trap cleanup_lock EXIT
+
+    is_logging_active "$id" && {
+        echo "[$(date)] Already logging, returning" >> /tmp/ops-logger-prompt-debug.log
+        cleanup_lock
+        return 0
+    }
+
+    load_config
+    echo "[$(date)] Config loaded - PROMPT_NEW_SHELLS: $PROMPT_NEW_SHELLS" >> /tmp/ops-logger-prompt-debug.log
+    
+    [[ "$PROMPT_NEW_SHELLS" != "true" ]] && {
+        echo "[$(date)] Prompting disabled, returning" >> /tmp/ops-logger-prompt-debug.log
+        cleanup_lock
+        return 0
+    }
+
+    # ✅ FIXED: Use tmux display-popup for proper interaction in tmux
+    if is_tmux; then
+        echo "[$(date)] In tmux, creating popup" >> /tmp/ops-logger-prompt-debug.log
+        
+        # Create a temporary script for the popup
+        local popup_script="/tmp/ops-prompt-${id}.sh"
+        local script_path=$(readlink -f "$0")
+        
+        cat > "$popup_script" << 'EOPOPUP'
+#!/bin/bash
+echo "Start logging this shell?"
+echo ""
+echo "  [Y]es - Start logging"
+echo "  [N]o  - Skip logging"
+echo ""
+
+read -n 1 -p "Choice [Y/n]: " response
+echo ""
+
+if [[ -z "$response" || "${response,,}" == "y" ]]; then
+    echo "Starting logging..."
+    __SCRIPT_PATH__ --start
+    echo "Logging started!"
+    sleep 2
+else
+    echo "Logging skipped."
+    sleep 1
+fi
+EOPOPUP
+        
+        # Replace placeholder with actual script path
+        sed -i "s|__SCRIPT_PATH__|$script_path|g" "$popup_script"
+        chmod +x "$popup_script"
+        
+        echo "[$(date)] Popup script created, calling display-popup" >> /tmp/ops-logger-prompt-debug.log
+        
+        # Use tmux display-popup for proper interaction
+        tmux display-popup -E -w 50 -h 10 -T "Ops Logger" "bash '$popup_script'; rm -f '$popup_script'"
+        
+        echo "[$(date)] display-popup completed" >> /tmp/ops-logger-prompt-debug.log
+        
+    else
+        echo "[$(date)] Not in tmux, using direct prompt" >> /tmp/ops-logger-prompt-debug.log
+        
+        # Direct shell - standard approach
+        echo "Start logging this shell?"
+        echo ""
+        echo "  [Y]es - Start logging"
+        echo "  [N]o  - Skip logging"
+        echo ""
+        
+        if read -t 10 -n 1 -p "Choice [Y/n]: " response; then
+            echo ""
+            if [[ -z "$response" || "${response,,}" == "y" ]]; then
+                start_logging
+                echo "Logging started!"
+            else
+                echo "Logging skipped."
+            fi
+        else
+            echo ""
+            echo "Timeout - logging skipped."
+        fi
+    fi
+    
+    # Clean up will be handled by trap
+    echo "[$(date)] prompt_for_logging completed" >> /tmp/ops-logger-prompt-debug.log
 }
 
 # ================================================================
 # TMUX INTEGRATION
 # ================================================================
 
-# Tmux integration functions
 install_tmux_keys() {
     load_config
-    
+
     if is_tmux; then
-        local script_path=$(readlink -f "$0")
-        
-        # Install key bindings that don't conflict with ohmytmux
-        tmux bind-key L run-shell "'$script_path' --toggle"
+        local script_path
+        script_path=$(readlink -f "$0")
+
+        # Bind keys
+        tmux bind-key L run-shell "bash -c '[ -f ~/.ops-logger.conf ] && tmux run-shell \"$script_path --toggle\" || tmux display-popup -E -w 80% -h 60% -T \"Ops Logger Config\" \"bash $script_path --toggle\"'"
         tmux bind-key R run-shell "'$script_path' --toggle-recording"
-        
-        # Install hooks for new windows/panes if enabled
+
+        # ✅ FIXED: Create a wrapper script that exports the pane context
         if [[ "$PROMPT_NEW_SHELLS" == "true" ]]; then
-            tmux set-hook -g after-new-window "run-shell \"sleep 1; '$script_path' --prompt\""
-            tmux set-hook -g after-split-window "run-shell \"sleep 1; '$script_path' --prompt\""
-        fi
+            local hook_wrapper="/tmp/ops-logger-pane-wrapper.sh"
+            cat > "$hook_wrapper" << EOWRAPPER
+#!/bin/bash
+# Wrapper that sets pane context and calls the prompt
+
+# Sleep to let pane initialize
+sleep 1
+
+# Check config
+if [ -f ~/.ops-logger.conf ]; then
+    source ~/.ops-logger.conf
+    if [ "\$PROMPT_NEW_SHELLS" = "true" ]; then
+        # Get pane info in tmux context
+        PANE_ID=\$(tmux display-message -p "#{session_name}-#{window_index}-#{pane_index}")
         
-        tmux display-message "Keys installed: prefix+L (logging), prefix+R (recording)"
+        # Check if already logging
+        if [ ! -f "/tmp/ops-logger-active-\$PANE_ID" ]; then
+            # Export the tmux pane reference for the script to use
+            export TMUX_PANE=\$(tmux display-message -p "#{pane_id}")
+            
+            # Call the script with the pane context
+            $script_path --prompt
+        fi
+    fi
+fi
+EOWRAPPER
+            chmod +x "$hook_wrapper"
+            
+            tmux set-hook -g after-new-window "run-shell '$hook_wrapper'"
+            tmux set-hook -g after-split-window "run-shell '$hook_wrapper'"
+            echo "Hooks installed for new windows/panes"
+        fi
+
+        echo "Keys installed: $(get_tmux_prefix)+L (logging), $(get_tmux_prefix)+R (recording)"
         log_debug "Tmux key bindings installed"
     else
         echo "Not in tmux, no keys installed"
@@ -1044,8 +1263,10 @@ uninstall_tmux_keys() {
         echo "Tmux keys removed"
         log_debug "Tmux key bindings removed"
         
-        # Remove our hook wrapper
+        # Remove our hook scripts
         rm -f /tmp/ops-logger-hook-wrapper.sh 2>/dev/null
+        rm -f /tmp/ops-logger-tmux-hook.sh 2>/dev/null
+        rm -f /tmp/ops-logger-pane-wrapper.sh 2>/dev/null
     fi
     
     # Also remove config file as user expected
@@ -1136,7 +1357,7 @@ show_status() {
 }
 
 show_help() {
-    echo "Red Team Terminal Logger - Professional Solution v2.5.1"
+    echo "Red Team Terminal Logger - Professional Solution v2.5.2"
     echo "========================================================"
     echo "USAGE: $0 [OPTIONS]"
     echo ""
@@ -1171,11 +1392,11 @@ show_help() {
     echo "  Compatible with ohmytmux themes and window naming"
     echo "  Auto-prompts for new windows/panes (configurable)"
     echo ""
-    echo "VERSION 2.5.1 FIXES:"
-    echo "  - FIXED: Eliminated all tmux popup messages requiring ESC key"  
-    echo "  - FIXED: All output now appears directly in the terminal"
-    echo "  - FIXED: Tmux key bindings use send-keys instead of run-shell"
-    echo "  - FIXED: Hooks properly redirect output to terminal"
+    echo "VERSION 2.5.2 FIXES:"
+    echo "  - FIXED: Verbose logs now include formatted command headers"
+    echo "  - FIXED: Configuration uses interactive tmux windows"
+    echo "  - FIXED: Command metadata properly captured and formatted"
+    echo "  - IMPROVED: Better separation of capture and formatting"
 }
 
 # Main command handler with output handling
